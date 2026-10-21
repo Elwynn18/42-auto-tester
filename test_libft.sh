@@ -1,32 +1,72 @@
 #!/usr/bin/env bash
 # **************************************************************************** #
-#  test_libft.sh - testeur libft en un seul fichier                            #
+#  test_libft.sh - single-file libft tester                                    #
 #                                                                              #
-#  Usage (depuis ton dossier Libft) :                                          #
-#      bash ../test_libft.sh               -> teste tout                       #
-#      bash ../test_libft.sh split itoa    -> teste seulement ces fonctions    #
+#  Usage (from your Libft folder):                                             #
+#      bash ../test_libft.sh               -> tests everything                 #
+#      bash ../test_libft.sh split itoa    -> tests only these functions       #
+#                                                                              #
+#  - On Windows (Git Bash), the script relaunches itself inside WSL.           #
+#  - Each function is compiled and tested on its own: a function that does     #
+#    not compile does not block the others.                                    #
+#  - AddressSanitizer catches crashes, buffer overflows and memory leaks.      #
+#  - malloc failures are simulated to check NULL returns and leaks.            #
+#  - Do NOT put this file in your repository.                                  #
 # **************************************************************************** #
 
-# ---------- Relance dans WSL si aucun compilateur (Git Bash sous Windows) ---- #
+# -------- Relaunch inside WSL if there is no compiler (Git Bash on Windows) - #
 if ! command -v cc >/dev/null 2>&1; then
 	if command -v wsl.exe >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
 		MSYS_NO_PATHCONV=1 exec wsl.exe --cd "$(pwd -W)" -e bash -c \
 			'exec bash "$(wslpath "$0")" "$@"' "$(cygpath -m "$0")" "$@"
 	fi
-	echo "Erreur : 'cc' introuvable. Lance ce script sous Linux / WSL." >&2
-	exit 1
-fi
-
-DIR=$(pwd)
-if [ ! -f "$DIR/libft.h" ]; then
-	echo "Erreur : libft.h introuvable. Lance ce script depuis ton dossier Libft." >&2
+	echo "Error: 'cc' not found. Run this script on Linux / WSL." >&2
 	exit 1
 fi
 
 if [ -t 1 ]; then
-	R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1;34m'; D=$'\e[2m'; N=$'\e[0m'
+	R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[1;34m'; CY=$'\e[1;36m'; BD=$'\e[1m'
+	D=$'\e[2m'; N=$'\e[0m'
 else
-	R=''; G=''; Y=''; B=''; D=''; N=''
+	R=''; G=''; Y=''; B=''; CY=''; BD=''; D=''; N=''
+fi
+
+# ---------------------------- Banner / disclaimer --------------------------- #
+# banner <title> <directory>
+banner() {
+	local i logo=(
+		'        :::      ::::::::'
+		'      :+:      :+:    :+:'
+		'    +:+ +:+         +:+'
+		'  +#+  +:+       +#+'
+		'+#+#+#+#+#+   +#+'
+		'     #+#    #+#'
+		'    ###   ########.fr'
+	)
+	local text=('' '' "$BD$1$N" "${D}unofficial tester, single file$N" "$D$2$N" '' '')
+
+	printf '\n'
+	for i in "${!logo[@]}"; do
+		if [ -n "${text[$i]}" ]; then
+			printf '  %s%-25s%s    %s\n' "$CY" "${logo[$i]}" "$N" "${text[$i]}"
+		else
+			printf '  %s%s%s\n' "$CY" "${logo[$i]}" "$N"
+		fi
+	done
+}
+
+disclaimer() {
+	printf '\n%s%s%s\n' "$D" '────────────────────────────────────────────────────────────────────────────' "$N"
+	printf '%sDisclaimer:%s this tester is only a helper. It can miss bugs or be wrong,\n' "$Y" "$N"
+	printf 'and a full OK does not mean your project will pass. It will never replace\n'
+	printf 'a peer-to-peer evaluation: understand your code and be ready to explain it.\n'
+}
+
+DIR=$(pwd)
+banner "libft tester" "$DIR"
+if [ ! -f "$DIR/libft.h" ]; then
+	echo "Error: libft.h not found. Run this script from your Libft folder." >&2
+	exit 1
 fi
 
 TMP=$(mktemp -d /tmp/test_libft.XXXXXX)
@@ -40,9 +80,10 @@ line_ok() { printf "  %-18s ${G}OK${N}%s\n" "$1" "${2:+ ${D}$2${N}}"; N_OK=$((N_
 line_ko() { printf "  %-18s ${R}KO${N}\n" "$1"; N_KO=$((N_KO + 1)); }
 line_skip() { printf "  %-18s ${D}-- %s${N}\n" "$1" "$2"; N_SKIP=$((N_SKIP + 1)); }
 msg() { printf "      ${R}✗${N} %s\n" "$1"; }
+# First compiler error ("erreur" = gcc running in a French locale)
 first_error() { grep -m1 -E "error|erreur|undefined" "$1" | sed -E 's|^.*/||; s/^[[:space:]]+//' | cut -c1-150; }
 
-# ---------------------------- Liste des fonctions --------------------------- #
+# ------------------------------- Function list ------------------------------ #
 PART1=(ft_isalpha ft_isdigit ft_isalnum ft_isascii ft_isprint ft_strlen ft_memset
 	ft_bzero ft_memcpy ft_memmove ft_strlcpy ft_strlcat ft_toupper ft_tolower
 	ft_strchr ft_strrchr ft_strncmp ft_memchr ft_memcmp ft_strnstr ft_atoi
@@ -89,7 +130,7 @@ declare -A PROTO=(
 	[ft_putnbr_fd]='void ft_putnbr_fd(int n, int fd);'
 	[ft_lstnew]='t_list *ft_lstnew(void *content);'
 	[ft_lstadd_front]='void ft_lstadd_front(t_list **lst, t_list *new);'
-	[ft_lstsize]='unsigned int ft_lstsize(t_list *lst);'
+	[ft_lstsize]='int ft_lstsize(t_list *lst);'
 	[ft_lstlast]='t_list *ft_lstlast(t_list *lst);'
 	[ft_lstadd_back]='void ft_lstadd_back(t_list **lst, t_list *new);'
 	[ft_lstdelone]='void ft_lstdelone(t_list *lst, void (*del)(void *));'
@@ -98,12 +139,18 @@ declare -A PROTO=(
 	[ft_lstmap]='t_list *ft_lstmap(t_list *lst, void *(*f)(void *), void (*del)(void *));'
 )
 
-# Filtre éventuel passé en argument (ex: "split" ou "ft_split")
+# Prototypes that differ between versions of the subject: both are accepted
+# (ft_lstsize returns int in older subjects, unsigned int in recent ones)
+declare -A PROTO_ALT=(
+	[ft_lstsize]='unsigned int ft_lstsize(t_list *lst);'
+)
+
+# Optional filter given as arguments (e.g. "split" or "ft_split")
 declare -A WANTED=()
 for a in "$@"; do WANTED["ft_${a#ft_}"]=1; done
 wanted() { [ ${#WANTED[@]} -eq 0 ] || [ -n "${WANTED[$1]}" ]; }
 
-# ------------------------- Préambule C commun aux tests --------------------- #
+# --------------------- C prelude shared by every test ----------------------- #
 prelude() { cat <<'EOF'
 #include "libft.h"
 #include <stdio.h>
@@ -119,7 +166,7 @@ prelude() { cat <<'EOF'
 #ifdef __SANITIZE_ADDRESS__
 # include <sanitizer/asan_interface.h>
 # include <sanitizer/lsan_interface.h>
-/* vérifie les fuites tout de suite (utile avant un test qui peut crasher) */
+/* check for leaks right now (useful before a test that may crash) */
 # define LEAK_CHECK() __lsan_do_recoverable_leak_check()
 #else
 # define LEAK_CHECK() ((void)0)
@@ -127,10 +174,10 @@ prelude() { cat <<'EOF'
 
 static int			g_ok = 0;
 static int			g_ko = 0;
-static const char	*g_case = "début du test";
+static const char	*g_case = "start of the test";
 static int			g_malloc_fail = 0;
 
-/* malloc truqué : le g_malloc_fail-ième appel renvoie NULL */
+/* rigged malloc: the g_malloc_fail-th call returns NULL */
 void	*__real_malloc(size_t size);
 void	*__wrap_malloc(size_t size)
 {
@@ -205,7 +252,7 @@ static void	tst_str(const char *d, const char *got, const char *exp)
 	if ((!got && !exp) || (got && exp && strcmp(got, exp) == 0))
 		g_ok++;
 	else
-		tst_fail("%s → %s, attendu %s", d, tst_q(got), tst_q(exp));
+		tst_fail("%s → %s, expected %s", d, tst_q(got), tst_q(exp));
 }
 
 #define CASE(d) (g_case = (d))
@@ -217,18 +264,18 @@ static void	tst_str(const char *d, const char *got, const char *exp)
 	char *tst_r = (char *)(expr); tst_str(d, tst_r, exp); free(tst_r); } while (0)
 #define CHECK_INT(d, expr, exp) do { CASE(d); long long tst_g = (long long)(expr); \
 	long long tst_e = (long long)(exp); if (tst_g == tst_e) g_ok++; \
-	else tst_fail("%s → %lld, attendu %lld", d, tst_g, tst_e); } while (0)
+	else tst_fail("%s → %lld, expected %lld", d, tst_g, tst_e); } while (0)
 #define SIGN(x) (((x) > 0) - ((x) < 0))
 #define CHECK_SIGN(d, expr, exp) do { CASE(d); int tst_g = (expr); int tst_e = (exp); \
 	if (SIGN(tst_g) == SIGN(tst_e)) g_ok++; \
-	else tst_fail("%s → %d, attendu une valeur %s", d, tst_g, \
+	else tst_fail("%s → %d, expected a value %s", d, tst_g, \
 		tst_e > 0 ? "> 0" : tst_e < 0 ? "< 0" : "= 0"); } while (0)
 #define CHECK_PTR(d, expr, exp, base) do { CASE(d); const void *tst_g = (expr); \
 	const void *tst_e = (exp); if (tst_g == tst_e) g_ok++; \
-	else tst_fail("%s → %s, attendu %s", d, tst_off(tst_g, base), \
+	else tst_fail("%s → %s, expected %s", d, tst_off(tst_g, base), \
 		tst_off(tst_e, base)); } while (0)
 
-/* capture de ce qui est écrit sur un fd */
+/* capture what is written to an fd */
 static int	tst_fds[2];
 static int	tst_cap(void)
 {
@@ -288,7 +335,7 @@ int	main(void)
 EOF
 }
 
-# Fonctions utilitaires pour les tests de listes
+# Helpers for the list tests
 list_helpers() { cat <<'EOF'
 static t_list	*tst_node(void *content)
 {
@@ -307,7 +354,7 @@ static void	tst_del(void *p)
 EOF
 }
 
-# ------------------------------- Corps des tests ---------------------------- #
+# -------------------------------- Test bodies ------------------------------- #
 body() {
 case "$1" in
 
@@ -374,19 +421,19 @@ static void	tst_run(void)
 	CASE("ft_memset(buf, 'x', 10)");
 	r = ft_memset(a, 'x', 10);
 	memset(b, 'x', 10);
-	CHECK("ft_memset(buf, 'x', 10) : contenu du buffer", !memcmp(a, b, 32));
-	CHECK("ft_memset(buf, 'x', 10) : doit renvoyer buf", r == a);
+	CHECK("ft_memset(buf, 'x', 10): buffer content", !memcmp(a, b, 32));
+	CHECK("ft_memset(buf, 'x', 10): must return buf", r == a);
 	CASE("ft_memset(buf + 5, 'y', 0)");
 	ft_memset(a + 5, 'y', 0);
-	CHECK("ft_memset(buf + 5, 'y', 0) : ne doit rien modifier", !memcmp(a, b, 32));
+	CHECK("ft_memset(buf + 5, 'y', 0): must not change anything", !memcmp(a, b, 32));
 	CASE("ft_memset(buf + 3, 'A' + 256, 5)");
 	ft_memset(a + 3, 'A' + 256, 5);
 	memset(b + 3, 'A' + 256, 5);
-	CHECK("ft_memset(buf + 3, 'A' + 256, 5) : c doit être converti en unsigned char", !memcmp(a, b, 32));
+	CHECK("ft_memset(buf + 3, 'A' + 256, 5): c must be converted to unsigned char", !memcmp(a, b, 32));
 	CASE("ft_memset(buf, -1, 4)");
 	ft_memset(a, -1, 4);
 	memset(b, -1, 4);
-	CHECK("ft_memset(buf, -1, 4) : doit écrire 0xff", !memcmp(a, b, 32));
+	CHECK("ft_memset(buf, -1, 4): must write 0xff", !memcmp(a, b, 32));
 	CASE("ft_memset(buf, 0, 32)");
 	ft_memset(a, 0, 32);
 	memset(b, 0, 32);
@@ -406,10 +453,10 @@ static void	tst_run(void)
 	CASE("ft_bzero(buf + 2, 5)");
 	ft_bzero(a + 2, 5);
 	memset(b + 2, 0, 5);
-	CHECK("ft_bzero(buf + 2, 5) : contenu du buffer", !memcmp(a, b, 32));
+	CHECK("ft_bzero(buf + 2, 5): buffer content", !memcmp(a, b, 32));
 	CASE("ft_bzero(buf, 0)");
 	ft_bzero(a, 0);
-	CHECK("ft_bzero(buf, 0) : ne doit rien modifier", !memcmp(a, b, 32));
+	CHECK("ft_bzero(buf, 0): must not change anything", !memcmp(a, b, 32));
 	CASE("ft_bzero(buf, 32)");
 	ft_bzero(a, 32);
 	memset(b, 0, 32);
@@ -431,11 +478,11 @@ static void	tst_run(void)
 	CASE("ft_memcpy(dst, \"abc\\0def\\0ghi\", 12)");
 	r = ft_memcpy(a, src, 12);
 	memcpy(b, src, 12);
-	CHECK("ft_memcpy(dst, \"abc\\0def\\0ghi\", 12) : doit copier au-delà des \\0", !memcmp(a, b, 16));
-	CHECK("ft_memcpy(dst, src, 12) : doit renvoyer dst", r == a);
+	CHECK("ft_memcpy(dst, \"abc\\0def\\0ghi\", 12): must copy past the \\0 bytes", !memcmp(a, b, 16));
+	CHECK("ft_memcpy(dst, src, 12): must return dst", r == a);
 	CASE("ft_memcpy(dst, \"zzz\", 0)");
 	ft_memcpy(a, "zzz", 0);
-	CHECK("ft_memcpy(dst, \"zzz\", 0) : ne doit rien modifier", !memcmp(a, b, 16));
+	CHECK("ft_memcpy(dst, \"zzz\", 0): must not change anything", !memcmp(a, b, 16));
 	CASE("ft_memcpy(dst + 4, \"XY\", 2)");
 	ft_memcpy(a + 4, "XY", 2);
 	memcpy(b + 4, "XY", 2);
@@ -455,23 +502,23 @@ static void	tst_run(void)
 	CASE("ft_memmove(s + 2, s, 10)");
 	r = ft_memmove(a + 2, a, 10);
 	memmove(b + 2, b, 10);
-	CHECK("ft_memmove(s + 2, s, 10) : chevauchement avec dst > src", !memcmp(a, b, 32));
-	CHECK("ft_memmove(s + 2, s, 10) : doit renvoyer dst", r == a + 2);
+	CHECK("ft_memmove(s + 2, s, 10): overlap with dst > src", !memcmp(a, b, 32));
+	CHECK("ft_memmove(s + 2, s, 10): must return dst", r == a + 2);
 	memset(a, 0, 32); strcpy(a, "0123456789abcdef"); memcpy(b, a, 32);
 	CASE("ft_memmove(s, s + 2, 10)");
 	ft_memmove(a, a + 2, 10);
 	memmove(b, b + 2, 10);
-	CHECK("ft_memmove(s, s + 2, 10) : chevauchement avec dst < src", !memcmp(a, b, 32));
+	CHECK("ft_memmove(s, s + 2, 10): overlap with dst < src", !memcmp(a, b, 32));
 	CASE("ft_memmove(s, s, 10)");
 	ft_memmove(a, a, 10);
-	CHECK("ft_memmove(s, s, 10) : ne doit rien changer", !memcmp(a, b, 32));
+	CHECK("ft_memmove(s, s, 10): must not change anything", !memcmp(a, b, 32));
 	CASE("ft_memmove(s + 20, s, 5)");
 	ft_memmove(a + 20, a, 5);
 	memmove(b + 20, b, 5);
-	CHECK("ft_memmove(s + 20, s, 5) : sans chevauchement", !memcmp(a, b, 32));
+	CHECK("ft_memmove(s + 20, s, 5): no overlap", !memcmp(a, b, 32));
 	CASE("ft_memmove(s, s + 1, 0)");
 	ft_memmove(a, a + 1, 0);
-	CHECK("ft_memmove(s, s + 1, 0) : ne doit rien modifier", !memcmp(a, b, 32));
+	CHECK("ft_memmove(s, s + 1, 0): must not change anything", !memcmp(a, b, 32));
 }
 EOF
 	;;
@@ -535,7 +582,7 @@ static void	tst_run(void)
 				if (ra == rb && !memcmp(a, b, 33))
 					g_ok++;
 				else
-					tst_fail("%s → retour %zu, dst %s ; attendu retour %zu, dst %s",
+					tst_fail("%s → returns %zu, dst %s; expected %zu, dst %s",
 						d, ra, tst_q(a), rb, tst_q(b));
 			}
 }
@@ -600,7 +647,7 @@ static void	tst_run(void)
 	char	s[] = "ab\0cd\xff";
 	struct { int c; size_t n; const char *desc; } t[] = {
 		{'a', 6, "ft_memchr(\"ab\\0cd\\xff\", 'a', 6)"},
-		{'c', 6, "ft_memchr(\"ab\\0cd\\xff\", 'c', 6) (après le \\0)"},
+		{'c', 6, "ft_memchr(\"ab\\0cd\\xff\", 'c', 6) (after the \\0)"},
 		{'c', 3, "ft_memchr(\"ab\\0cd\\xff\", 'c', 3)"},
 		{'\0', 6, "ft_memchr(\"ab\\0cd\\xff\", '\\0', 6)"},
 		{'z', 6, "ft_memchr(\"ab\\0cd\\xff\", 'z', 6)"},
@@ -624,7 +671,7 @@ static void	tst_run(void)
 		{"abc", "abd", 3, "ft_memcmp(\"abc\", \"abd\", 3)"},
 		{"abd", "abc", 3, "ft_memcmp(\"abd\", \"abc\", 3)"},
 		{"abc", "abd", 2, "ft_memcmp(\"abc\", \"abd\", 2)"},
-		{"ab\0c", "ab\0d", 4, "ft_memcmp(\"ab\\0c\", \"ab\\0d\", 4) (après le \\0)"},
+		{"ab\0c", "ab\0d", 4, "ft_memcmp(\"ab\\0c\", \"ab\\0d\", 4) (after the \\0)"},
 		{"\xff", "\x01", 1, "ft_memcmp(\"\\xff\", \"\\x01\", 1) (unsigned char)"},
 		{"\x01", "\xff", 1, "ft_memcmp(\"\\x01\", \"\\xff\", 1) (unsigned char)"},
 		{"abc", "xyz", 0, "ft_memcmp(\"abc\", \"xyz\", 0)"},
@@ -699,33 +746,33 @@ static void	tst_run(void)
 
 	CASE("ft_calloc(5, 4)");
 	p = ft_calloc(5, 4);
-	CHECK("ft_calloc(5, 4) : ne doit pas renvoyer NULL", p != NULL);
+	CHECK("ft_calloc(5, 4): must not return NULL", p != NULL);
 	if (p)
 	{
 		zero = 1;
 		for (int i = 0; i < 20; i++)
 			if (p[i])
 				zero = 0;
-		CHECK("ft_calloc(5, 4) : les 20 octets doivent valoir 0", zero);
+		CHECK("ft_calloc(5, 4): all 20 bytes must be 0", zero);
 		free(p);
 	}
 	CASE("ft_calloc(0, 0)");
 	p = ft_calloc(0, 0);
-	CHECK("ft_calloc(0, 0) : doit renvoyer un pointeur unique libérable (pas NULL)", p != NULL);
+	CHECK("ft_calloc(0, 0): must return a unique pointer that can be freed (not NULL)", p != NULL);
 	free(p);
 	CASE("ft_calloc(0, 5)");
 	p = ft_calloc(0, 5);
-	CHECK("ft_calloc(0, 5) : doit renvoyer un pointeur unique libérable (pas NULL)", p != NULL);
+	CHECK("ft_calloc(0, 5): must return a unique pointer that can be freed (not NULL)", p != NULL);
 	free(p);
 	CASE("ft_calloc(SIZE_MAX / 2 + 1, 2)");
 	p = ft_calloc(SIZE_MAX / 2 + 1, 2);
-	CHECK("ft_calloc(SIZE_MAX / 2 + 1, 2) : nmemb * size dépasse SIZE_MAX, doit renvoyer NULL", p == NULL);
+	CHECK("ft_calloc(SIZE_MAX / 2 + 1, 2): nmemb * size overflows SIZE_MAX, must return NULL", p == NULL);
 	free(p);
-	CASE("ft_calloc(4, 4) avec malloc qui échoue");
+	CASE("ft_calloc(4, 4) with malloc failing");
 	FAIL_MALLOC(1);
 	p = ft_calloc(4, 4);
 	FAIL_MALLOC(0);
-	CHECK("ft_calloc(4, 4) : doit renvoyer NULL si malloc échoue", p == NULL);
+	CHECK("ft_calloc(4, 4): must return NULL if malloc fails", p == NULL);
 	free(p);
 }
 EOF
@@ -742,10 +789,10 @@ static void	tst_run(void)
 	CHECK_STRF("ft_strdup(\"a b\\tc\")", ft_strdup("a b\tc"), "a b\tc");
 	CASE("ft_strdup(s)");
 	r = ft_strdup(s);
-	CHECK("ft_strdup(s) : doit renvoyer une nouvelle zone mémoire", r != s);
+	CHECK("ft_strdup(s): must return a new memory area", r != s);
 	free(r);
 	FAIL_MALLOC(1);
-	CHECK_STRF("ft_strdup(\"abc\") avec malloc qui échoue", ft_strdup("abc"), NULL);
+	CHECK_STRF("ft_strdup(\"abc\") with malloc failing", ft_strdup("abc"), NULL);
 	FAIL_MALLOC(0);
 }
 EOF
@@ -767,7 +814,7 @@ static void	tst_run(void)
 	CHECK_STRF("ft_substr(\"\", 0, 1)", ft_substr(e, 0, 1), "");
 	CHECK_STRF("ft_substr(\"\", 1, 1)", ft_substr(e, 1, 1), "");
 	FAIL_MALLOC(1);
-	CHECK_STRF("ft_substr(\"hello world\", 0, 5) avec malloc qui échoue", ft_substr(s, 0, 5), NULL);
+	CHECK_STRF("ft_substr(\"hello world\", 0, 5) with malloc failing", ft_substr(s, 0, 5), NULL);
 	FAIL_MALLOC(0);
 	CHECK_STRF("ft_substr(\"hello world\", 3, SIZE_MAX)", ft_substr(s, 3, SIZE_MAX), "lo world");
 	free(s);
@@ -784,7 +831,7 @@ static void	tst_run(void)
 	CHECK_STRF("ft_strjoin(\"\", \"def\")", ft_strjoin("", "def"), "def");
 	CHECK_STRF("ft_strjoin(\"\", \"\")", ft_strjoin("", ""), "");
 	FAIL_MALLOC(1);
-	CHECK_STRF("ft_strjoin(\"abc\", \"def\") avec malloc qui échoue", ft_strjoin("abc", "def"), NULL);
+	CHECK_STRF("ft_strjoin(\"abc\", \"def\") with malloc failing", ft_strjoin("abc", "def"), NULL);
 	FAIL_MALLOC(0);
 }
 EOF
@@ -804,7 +851,7 @@ static void	tst_run(void)
 	CHECK_STRF("ft_strtrim(\"\", \" \")", ft_strtrim("", " "), "");
 	CHECK_STRF("ft_strtrim(\"abc\", \"cba\")", ft_strtrim("abc", "cba"), "");
 	FAIL_MALLOC(1);
-	CHECK_STRF("ft_strtrim(\" ab \", \" \") avec malloc qui échoue", ft_strtrim(" ab ", " "), NULL);
+	CHECK_STRF("ft_strtrim(\" ab \", \" \") with malloc failing", ft_strtrim(" ab ", " "), NULL);
 	FAIL_MALLOC(0);
 }
 EOF
@@ -832,7 +879,7 @@ static void	tst_split_check(const char *d, char **r, const char **exp)
 	if (!exp[i] && !r[i])
 		g_ok++;
 	else
-		tst_fail("%s → case [%d] = %s, attendu %s", d, i, tst_q(r[i]), tst_q(exp[i]));
+		tst_fail("%s → tab[%d] = %s, expected %s", d, i, tst_q(r[i]), tst_q(exp[i]));
 	tst_free_tab(r);
 }
 
@@ -854,7 +901,7 @@ static void	tst_run(void)
 	CHECK_SPLIT("ft_split(\"xxhelloxxworldxx\", 'x')", "xxhelloxxworldxx", 'x', "hello", "world");
 	for (int n = 1; n <= 4; n++)
 	{
-		snprintf(d, sizeof d, "ft_split(\"aa bb cc\", ' ') avec le malloc n°%d qui échoue", n);
+		snprintf(d, sizeof d, "ft_split(\"aa bb cc\", ' ') with malloc #%d failing", n);
 		CASE(d);
 		FAIL_MALLOC(n);
 		r = ft_split("aa bb cc", ' ');
@@ -884,7 +931,7 @@ static void	tst_run(void)
 		CHECK_STRF(d, ft_itoa(t[i]), e);
 	}
 	FAIL_MALLOC(1);
-	CHECK_STRF("ft_itoa(42) avec malloc qui échoue", ft_itoa(42), NULL);
+	CHECK_STRF("ft_itoa(42) with malloc failing", ft_itoa(42), NULL);
 	FAIL_MALLOC(0);
 }
 EOF
@@ -900,12 +947,12 @@ static void	tst_run(void)
 {
 	char	*s = strdup("hello world");
 
-	CHECK_STRF("ft_strmapi(\"hello world\", f) avec f = majuscule aux index impairs",
+	CHECK_STRF("ft_strmapi(\"hello world\", f) with f = uppercase at odd indexes",
 		ft_strmapi(s, tst_map), "hElLo wOrLd");
-	CHECK("ft_strmapi : ne doit pas modifier la chaîne d'origine", !strcmp(s, "hello world"));
+	CHECK("ft_strmapi: must not modify the original string", !strcmp(s, "hello world"));
 	CHECK_STRF("ft_strmapi(\"\", f)", ft_strmapi("", tst_map), "");
 	FAIL_MALLOC(1);
-	CHECK_STRF("ft_strmapi(\"abc\", f) avec malloc qui échoue", ft_strmapi("abc", tst_map), NULL);
+	CHECK_STRF("ft_strmapi(\"abc\", f) with malloc failing", ft_strmapi("abc", tst_map), NULL);
 	FAIL_MALLOC(0);
 	free(s);
 }
@@ -932,12 +979,12 @@ static void	tst_run(void)
 	g_base = s;
 	CASE("ft_striteri(\"hello world\", f)");
 	ft_striteri(s, tst_iter);
-	CHECK_STR("ft_striteri(\"hello world\", f) avec f = majuscule aux index impairs", s, "hElLo wOrLd");
-	CHECK("ft_striteri : f doit recevoir l'index i et l'adresse &s[i]", !g_bad);
+	CHECK_STR("ft_striteri(\"hello world\", f) with f = uppercase at odd indexes", s, "hElLo wOrLd");
+	CHECK("ft_striteri: f must receive the index i and the address &s[i]", !g_bad);
 	g_base = e;
 	CASE("ft_striteri(\"\", f)");
 	ft_striteri(e, tst_iter);
-	CHECK("ft_striteri(\"\", f) : ne doit rien faire", e[0] == 0);
+	CHECK("ft_striteri(\"\", f): must do nothing", e[0] == 0);
 	free(s);
 }
 EOF
@@ -1007,22 +1054,22 @@ static void	tst_run(void)
 
 	CASE("ft_lstnew(&x)");
 	n = ft_lstnew(&x);
-	CHECK("ft_lstnew(&x) : ne doit pas renvoyer NULL", n != NULL);
+	CHECK("ft_lstnew(&x): must not return NULL", n != NULL);
 	if (n)
 	{
-		CHECK("ft_lstnew(&x) : content doit valoir &x", n->content == &x);
-		CHECK("ft_lstnew(&x) : next doit valoir NULL", n->next == NULL);
+		CHECK("ft_lstnew(&x): content must be &x", n->content == &x);
+		CHECK("ft_lstnew(&x): next must be NULL", n->next == NULL);
 		free(n);
 	}
 	CASE("ft_lstnew(NULL)");
 	n = ft_lstnew(NULL);
-	CHECK("ft_lstnew(NULL) : nœud avec content NULL", n && !n->content && !n->next);
+	CHECK("ft_lstnew(NULL): node with a NULL content", n && !n->content && !n->next);
 	free(n);
-	CASE("ft_lstnew(&x) avec malloc qui échoue");
+	CASE("ft_lstnew(&x) with malloc failing");
 	FAIL_MALLOC(1);
 	n = ft_lstnew(&x);
 	FAIL_MALLOC(0);
-	CHECK("ft_lstnew(&x) : doit renvoyer NULL si malloc échoue", n == NULL);
+	CHECK("ft_lstnew(&x): must return NULL if malloc fails", n == NULL);
 	free(n);
 }
 EOF
@@ -1035,14 +1082,14 @@ static void	tst_run(void)
 	t_list	*a = tst_node("a");
 	t_list	*b = tst_node("b");
 
-	CASE("ft_lstadd_front(&lst, a) avec lst vide");
+	CASE("ft_lstadd_front(&lst, a) with an empty lst");
 	ft_lstadd_front(&lst, a);
-	CHECK("ft_lstadd_front(&lst, a) avec lst vide : lst doit valoir a", lst == a);
-	CHECK("ft_lstadd_front(&lst, a) avec lst vide : a->next doit valoir NULL", a->next == NULL);
-	CASE("ft_lstadd_front(&lst, b) avec lst = a");
+	CHECK("ft_lstadd_front(&lst, a) with an empty lst: lst must be a", lst == a);
+	CHECK("ft_lstadd_front(&lst, a) with an empty lst: a->next must be NULL", a->next == NULL);
+	CASE("ft_lstadd_front(&lst, b) with lst = a");
 	ft_lstadd_front(&lst, b);
-	CHECK("ft_lstadd_front(&lst, b) : lst doit valoir b", lst == b);
-	CHECK("ft_lstadd_front(&lst, b) : b->next doit valoir a", b->next == a);
+	CHECK("ft_lstadd_front(&lst, b): lst must be b", lst == b);
+	CHECK("ft_lstadd_front(&lst, b): b->next must be a", b->next == a);
 	free(a);
 	free(b);
 }
@@ -1075,11 +1122,11 @@ static void	tst_run(void)
 	t_list	*b = tst_node("b");
 	t_list	*c = tst_node("c");
 
-	CHECK("ft_lstlast(NULL) : doit renvoyer NULL", ft_lstlast(NULL) == NULL);
-	CHECK("ft_lstlast(a) : doit renvoyer a", ft_lstlast(a) == a);
+	CHECK("ft_lstlast(NULL): must return NULL", ft_lstlast(NULL) == NULL);
+	CHECK("ft_lstlast(a): must return a", ft_lstlast(a) == a);
 	a->next = b;
 	b->next = c;
-	CHECK("ft_lstlast(a -> b -> c) : doit renvoyer c", ft_lstlast(a) == c);
+	CHECK("ft_lstlast(a -> b -> c): must return c", ft_lstlast(a) == c);
 	free(a);
 	free(b);
 	free(c);
@@ -1095,17 +1142,17 @@ static void	tst_run(void)
 	t_list	*b = tst_node("b");
 	t_list	*c = tst_node("c");
 
-	CASE("ft_lstadd_back(&lst, a) avec lst vide");
+	CASE("ft_lstadd_back(&lst, a) with an empty lst");
 	ft_lstadd_back(&lst, a);
-	CHECK("ft_lstadd_back(&lst, a) avec lst vide : lst doit valoir a", lst == a);
-	CASE("ft_lstadd_back(&lst, b) avec lst = a");
+	CHECK("ft_lstadd_back(&lst, a) with an empty lst: lst must be a", lst == a);
+	CASE("ft_lstadd_back(&lst, b) with lst = a");
 	ft_lstadd_back(&lst, b);
-	CHECK("ft_lstadd_back(&lst, b) : lst doit toujours valoir a", lst == a);
-	CHECK("ft_lstadd_back(&lst, b) : a->next doit valoir b", a->next == b);
-	CASE("ft_lstadd_back(&lst, c) avec lst = a -> b");
+	CHECK("ft_lstadd_back(&lst, b): lst must still be a", lst == a);
+	CHECK("ft_lstadd_back(&lst, b): a->next must be b", a->next == b);
+	CASE("ft_lstadd_back(&lst, c) with lst = a -> b");
 	ft_lstadd_back(&lst, c);
-	CHECK("ft_lstadd_back(&lst, c) : b->next doit valoir c", b->next == c);
-	CHECK("ft_lstadd_back(&lst, c) : c->next doit valoir NULL", c->next == NULL);
+	CHECK("ft_lstadd_back(&lst, c): b->next must be c", b->next == c);
+	CHECK("ft_lstadd_back(&lst, c): c->next must be NULL", c->next == NULL);
 	free(a);
 	free(b);
 	free(c);
@@ -1120,11 +1167,11 @@ static void	tst_run(void)
 	t_list	*b = tst_node(strdup("b"));
 
 	a->next = b;
-	CASE("ft_lstdelone(a, del) avec a -> b");
+	CASE("ft_lstdelone(a, del) with a -> b");
 	ft_lstdelone(a, tst_del);
-	CHECK_INT("ft_lstdelone(a, del) : nombre d'appels à del", g_del, 1);
-	CASE("accès à b après ft_lstdelone(a, del)");
-	CHECK("ft_lstdelone(a, del) : b ne doit pas être touché", !strcmp(b->content, "b"));
+	CHECK_INT("ft_lstdelone(a, del): number of calls to del", g_del, 1);
+	CASE("accessing b after ft_lstdelone(a, del)");
+	CHECK("ft_lstdelone(a, del): b must not be touched", !strcmp(b->content, "b"));
 	free(b->content);
 	free(b);
 }
@@ -1139,13 +1186,13 @@ static void	tst_run(void)
 
 	lst->next = tst_node(strdup("b"));
 	lst->next->next = tst_node(strdup("c"));
-	CASE("ft_lstclear(&lst, del) avec lst = a -> b -> c");
+	CASE("ft_lstclear(&lst, del) with lst = a -> b -> c");
 	ft_lstclear(&lst, tst_del);
-	CHECK("ft_lstclear(&lst, del) : lst doit valoir NULL", lst == NULL);
-	CHECK_INT("ft_lstclear(&lst, del) : nombre d'appels à del", g_del, 3);
-	CASE("ft_lstclear(&lst, del) avec lst vide");
+	CHECK("ft_lstclear(&lst, del): lst must be NULL", lst == NULL);
+	CHECK_INT("ft_lstclear(&lst, del): number of calls to del", g_del, 3);
+	CASE("ft_lstclear(&lst, del) with an empty lst");
 	ft_lstclear(&empty, tst_del);
-	CHECK("ft_lstclear(&lst, del) avec lst vide : ne doit rien faire", empty == NULL && g_del == 3);
+	CHECK("ft_lstclear(&lst, del) with an empty lst: must do nothing", empty == NULL && g_del == 3);
 }
 EOF
 	;;
@@ -1165,13 +1212,13 @@ static void	tst_run(void)
 
 	a->next = b;
 	b->next = c;
-	CASE("ft_lstiter(a -> b -> c, f) avec f = +1");
+	CASE("ft_lstiter(a -> b -> c, f) with f = +1");
 	ft_lstiter(a, tst_inc);
-	CHECK("ft_lstiter(1 -> 2 -> 3, f) avec f = +1 : doit donner 2 -> 3 -> 4",
+	CHECK("ft_lstiter(1 -> 2 -> 3, f) with f = +1: must give 2 -> 3 -> 4",
 		v[0] == 2 && v[1] == 3 && v[2] == 4);
 	CASE("ft_lstiter(NULL, f)");
 	ft_lstiter(NULL, tst_inc);
-	CHECK("ft_lstiter(NULL, f) : ne doit rien faire", 1);
+	CHECK("ft_lstiter(NULL, f): must do nothing", 1);
 	free(a);
 	free(b);
 	free(c);
@@ -1210,21 +1257,21 @@ static void	tst_run(void)
 
 	a->next = tst_node(&v[1]);
 	a->next->next = tst_node(&v[2]);
-	CASE("ft_lstmap(1 -> 2 -> 3, f, del) avec f = x2");
+	CASE("ft_lstmap(1 -> 2 -> 3, f, del) with f = x2");
 	r = ft_lstmap(a, tst_dbl, free);
-	CHECK("ft_lstmap(1 -> 2 -> 3, f, del) avec f = x2 : doit donner 2 -> 4 -> 6",
+	CHECK("ft_lstmap(1 -> 2 -> 3, f, del) with f = x2: must give 2 -> 4 -> 6",
 		r && r->next && r->next->next && !r->next->next->next
 		&& *(int *)r->content == 2 && *(int *)r->next->content == 4
 		&& *(int *)r->next->next->content == 6);
-	CHECK("ft_lstmap : la liste d'origine ne doit pas changer",
+	CHECK("ft_lstmap: the original list must not change",
 		v[0] == 1 && v[1] == 2 && v[2] == 3 && a->content == &v[0]);
-	CHECK("ft_lstmap : doit créer de nouveaux nœuds", r != a);
+	CHECK("ft_lstmap: must create new nodes", r != a);
 	if (r != a)
 		tst_free_map(r);
-	CHECK("ft_lstmap(NULL, f, del) : doit renvoyer NULL", ft_lstmap(NULL, tst_dbl, free) == NULL);
+	CHECK("ft_lstmap(NULL, f, del): must return NULL", ft_lstmap(NULL, tst_dbl, free) == NULL);
 	for (int n = 1; n <= 3; n++)
 	{
-		snprintf(d, sizeof d, "ft_lstmap(1 -> 2 -> 3, f, del) avec le malloc n°%d qui échoue", n);
+		snprintf(d, sizeof d, "ft_lstmap(1 -> 2 -> 3, f, del) with malloc #%d failing", n);
 		CASE(d);
 		FAIL_MALLOC(n);
 		r = ft_lstmap(a, tst_dbl, free);
@@ -1243,14 +1290,14 @@ EOF
 esac
 }
 
-# --------------------------- Lecture du rapport ASan ------------------------ #
-# Affiche "fichier.c:ligne" de la première frame dans le code de l'élève
+# ---------------------------- Reading ASan reports -------------------------- #
+# First stack frame inside your code, as "file.c:line (function)"
 user_frame() {
 	grep -E "^[[:space:]]+#[0-9]+ .* in [^ ]+ $DIR/" | head -1 \
 		| sed -E "s|.* in ([^ ]+) $DIR/([^ ]+).*|\2 (\1)|"
 }
 
-# Ligne du test qui a fait l'appel fautif
+# Line of the test that made the faulty call
 test_frame_line() {
 	local src=$1 n
 	n=$(grep -E "in tst_run .*$(basename "$src"):[0-9]+" | head -1 | sed -E 's/.*:([0-9]+).*/\1/')
@@ -1263,58 +1310,63 @@ asan_report() {
 		type=$(grep -m1 -oE "ERROR: AddressSanitizer: [a-zA-Z_-]+" "$err" | awk '{print $3}')
 		loc=$(sed -n '/ERROR: AddressSanitizer/,/^$/p' "$err" | user_frame)
 		if [ -n "$loc" ]; then
-			msg "erreur mémoire ($type) dans $loc"
+			msg "memory error ($type) in $loc"
 		else
 			loc=$(sed -n '/allocated by thread/,/^$/p' "$err" | user_frame)
-			msg "erreur mémoire ($type) en lisant le résultat de ta fonction${loc:+ (zone allouée dans $loc)}"
+			msg "memory error ($type) while reading the result of your function${loc:+ (memory allocated in $loc)}"
 		fi
 	fi
 	if grep -q "ERROR: LeakSanitizer" "$err"; then
-		msg "fuite mémoire : $(grep -m1 -oE '[0-9]+ byte\(s\) leaked in [0-9]+ allocation\(s\)' "$err")"
-		# un bloc par fuite : où a été fait le malloc, et quel appel du test
+		msg "memory leak: $(grep -m1 -oE '[0-9]+ byte\(s\) leaked in [0-9]+ allocation\(s\)' "$err")"
+		# one block per leak: where the malloc was made, and which call of the test
 		awk '/leak of/{n++} {print > (FILENAME "." n)}' "$err"
 		for blk in "$err".[1-9]*; do
 			[ -f "$blk" ] || continue
 			loc=$(user_frame < "$blk")
 			call=$(test_frame_line "$src" < "$blk")
-			printf "        ${D}malloc dans %s%s${N}\n" "${loc:-?}" "${call:+ ← appel : $call}"
+			printf "        ${D}malloc in %s%s${N}\n" "${loc:-?}" "${call:+ ← call: $call}"
 		done | sort -u | head -4
 	fi
 }
 
-# ------------------------------ Test d'une fonction ------------------------- #
+# ------------------------------ Testing a function -------------------------- #
 run_test() {
 	local fn=$1 src="$TMP/t_$fn.c" bin="$TMP/t_$fn" out rc res ok ko msgs=()
 
 	if [ ! -f "$DIR/$fn.c" ]; then
-		line_skip "$fn" "non réalisé"
+		line_skip "$fn" "not done"
 		return
 	fi
-	[ -n "${STRICT[$fn]}" ] && msgs+=("ne compile pas avec -Wall -Wextra -Werror : ${STRICT[$fn]}")
-	grep -Eq "\b$fn[[:space:]]*\(" "$DIR/libft.h" || msgs+=("prototype absent de libft.h")
+	[ -n "${STRICT[$fn]}" ] && msgs+=("does not compile with -Wall -Wextra -Werror: ${STRICT[$fn]}")
+	grep -Eq "\b$fn[[:space:]]*\(" "$DIR/libft.h" || msgs+=("prototype missing from libft.h")
 	[ -n "${STYLE[$fn]}" ] && msgs+=("${STYLE[$fn]}")
 
 	if [ -n "${BROKEN[$fn]}" ]; then
 		line_ko "$fn"
 		for m in "${msgs[@]}"; do msg "$m"; done
-		[ -z "${STRICT[$fn]}" ] && msg "ne compile pas : ${BROKEN[$fn]}"
+		[ -z "${STRICT[$fn]}" ] && msg "does not compile: ${BROKEN[$fn]}"
 		return
 	fi
 
 	{ prelude; echo "${PROTO[$fn]}"; body "$fn"; } > "$src"
 	build() { cc $SAN -g -w -I"$DIR" "$src" -o "$bin" -L"$TMP" -ltest -Wl,--wrap=malloc 2> "$TMP/cerr"; }
 	if ! build && grep -q "conflicting types" "$TMP/cerr"; then
-		# prototype différent du sujet : on le signale, puis on teste quand même
-		msgs+=("prototype dans libft.h différent du sujet. Attendu : ${PROTO[$fn]}")
-		{ prelude; body "$fn"; } > "$src"
+		# the prototype from another version of the subject is fine too
+		if [ -n "${PROTO_ALT[$fn]}" ] && { prelude; echo "${PROTO_ALT[$fn]}"; body "$fn"; } > "$src" && build; then
+			:
+		else
+			# prototype differs from the subject: report it, then test anyway
+			msgs+=("prototype in libft.h differs from the subject. Expected: ${PROTO[$fn]}${PROTO_ALT[$fn]:+ or ${PROTO_ALT[$fn]}}")
+			{ prelude; body "$fn"; } > "$src"
+		fi
 	fi
 	if [ ! -x "$bin" ] && ! build; then
 		line_ko "$fn"
 		for m in "${msgs[@]}"; do msg "$m"; done
 		if grep -q "undefined reference to .$fn'" "$TMP/cerr"; then
-			msg "$fn n'est pas défini (mauvais nom de fonction ?)"
+			msg "$fn is not defined (wrong function name?)"
 		else
-			msg "le test ne compile pas : $(first_error "$TMP/cerr")"
+			msg "the test does not compile: $(first_error "$TMP/cerr")"
 		fi
 		return
 	fi
@@ -1333,25 +1385,23 @@ run_test() {
 	for m in "${msgs[@]}"; do msg "$m"; done
 	grep "^@@MSG " <<< "$out" | sed 's/^@@MSG //' | while IFS= read -r m; do msg "$m"; done
 	if [ $rc -eq 124 ]; then
-		msg "boucle infinie (timeout 5 s) pendant : $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
+		msg "infinite loop (5 s timeout) during: $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
 	elif [ -z "$res" ]; then
-		msg "crash pendant : $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
+		msg "crash during: $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
 	fi
 	asan_report "$TMP/rerr" "$src"
 }
 
-# ================================== Début =================================== #
-printf "${B}Testeur libft${N} ${D}($DIR)${N}\n"
-
-# AddressSanitizer disponible ?
+# =================================== Start ================================== #
+# Is AddressSanitizer available?
 SAN="-fsanitize=address"
 echo 'int main(void){return 0;}' > "$TMP/asan.c"
 if ! cc $SAN "$TMP/asan.c" -o "$TMP/asan" 2>/dev/null || ! "$TMP/asan" 2>/dev/null; then
 	SAN=""
-	printf "${Y}AddressSanitizer indisponible : pas de détection des fuites / débordements.${N}\n"
+	printf "${Y}AddressSanitizer unavailable: leaks and buffer overflows will not be detected.${N}\n"
 fi
 
-# ------------------------------- Compilation -------------------------------- #
+# -------------------------------- Compilation ------------------------------- #
 declare -A STRICT=() BROKEN=() STYLE=()
 ALLOWED_EXT="malloc free write"
 for f in "$DIR"/*.c; do
@@ -1360,20 +1410,20 @@ for f in "$DIR"/*.c; do
 	if ! cc -Wall -Wextra -Werror -c "$f" -I"$DIR" -o "$TMP/strict/$fn.o" 2> "$TMP/err"; then
 		STRICT[$fn]=$(first_error "$TMP/err")
 	else
-		# fonctions externes interdites / variables globales
+		# forbidden external functions / global variables
 		bad=$(nm -u "$TMP/strict/$fn.o" | awk '{print $2}' \
 			| grep -vE '^(ft_|_GLOBAL_OFFSET_TABLE_|__stack_chk_fail)' \
 			| grep -vxF -f <(tr ' ' '\n' <<< "$ALLOWED_EXT") | tr '\n' ' ')
-		[ -n "$bad" ] && STYLE[$fn]="fonction(s) externe(s) interdite(s) : $bad"
+		[ -n "$bad" ] && STYLE[$fn]="forbidden external function(s): $bad"
 		glob=$(nm "$TMP/strict/$fn.o" | awk '$2 ~ /^[BCDGRSbdgs]$/ {print $3}' | tr '\n' ' ')
-		[ -n "$glob" ] && STYLE[$fn]="${STYLE[$fn]:+${STYLE[$fn]} ; }variable(s) globale(s) : $glob"
+		[ -n "$glob" ] && STYLE[$fn]="${STYLE[$fn]:+${STYLE[$fn]}; }global variable(s): $glob"
 	fi
-	# fonctions auxiliaires non static
+	# helper functions that are not static
 	helpers=$(grep -E '^[a-zA-Z_][a-zA-Z0-9_[:space:]*]*[[:space:]*][a-zA-Z_][a-zA-Z0-9_]*\(' "$f" \
 		| grep -vE '^static|;[[:space:]]*$' \
 		| sed -E 's/^[^(]*[[:space:]*]([a-zA-Z_][a-zA-Z0-9_]*)\(.*/\1/' \
 		| grep -vx "$fn" | grep -vx main | tr '\n' ' ')
-	[ -n "$helpers" ] && STYLE[$fn]="${STYLE[$fn]:+${STYLE[$fn]} ; }fonction(s) auxiliaire(s) non static : $helpers"
+	[ -n "$helpers" ] && STYLE[$fn]="${STYLE[$fn]:+${STYLE[$fn]}; }non-static helper function(s): $helpers"
 	if ! cc $SAN -g -w -c "$f" -I"$DIR" -o "$TMP/obj/$fn.o" 2> "$TMP/err"; then
 		BROKEN[$fn]=$(first_error "$TMP/err")
 		rm -f "$TMP/obj/$fn.o"
@@ -1386,7 +1436,7 @@ if [ ${#WANTED[@]} -eq 0 ]; then
 	section "Makefile"
 	cp "$DIR"/*.c "$DIR"/*.h "$DIR"/Makefile "$TMP/mk/" 2>/dev/null
 	if [ ! -f "$TMP/mk/Makefile" ]; then
-		line_ko "Makefile"; msg "fichier Makefile absent"
+		line_ko "Makefile"; msg "Makefile missing"
 	else
 		mk() { make -C "$TMP/mk" "$@" 2>&1; }
 		out=$(mk)
@@ -1397,18 +1447,18 @@ if [ ${#WANTED[@]} -eq 0 ]; then
 				fn=$(basename "$f" .c)
 				ar t "$TMP/mk/libft.a" | grep -qx "$fn.o" || missing+="$fn.o "
 			done
-			if [ -z "$missing" ]; then line_ok "contenu libft.a"
-			else line_ko "contenu libft.a"; msg "absents de libft.a : $missing"; fi
+			if [ -z "$missing" ]; then line_ok "libft.a content"
+			else line_ko "libft.a content"; msg "missing from libft.a: $missing"; fi
 			out=$(mk)
 			if grep -qE '(^|[[:space:]/])(cc|gcc|clang|ar)[[:space:]]' <<< "$out"; then
-				line_ko "relink"; msg "un 2e 'make' recompile alors que rien n'a changé"
+				line_ko "relink"; msg "a 2nd 'make' rebuilds although nothing changed"
 			else line_ok "relink"; fi
 			mk clean > /dev/null
 			if ls "$TMP/mk"/*.o > /dev/null 2>&1 || [ ! -f "$TMP/mk/libft.a" ]; then
-				line_ko "make clean"; msg "doit supprimer les .o et garder libft.a"
+				line_ko "make clean"; msg "must delete the .o files and keep libft.a"
 			else line_ok "make clean"; fi
 			mk fclean > /dev/null
-			if [ -f "$TMP/mk/libft.a" ]; then line_ko "make fclean"; msg "libft.a n'est pas supprimé"
+			if [ -f "$TMP/mk/libft.a" ]; then line_ko "make fclean"; msg "libft.a is not deleted"
 			else line_ok "make fclean"; fi
 			if mk re > /dev/null && [ -f "$TMP/mk/libft.a" ]; then line_ok "make re"
 			else line_ko "make re"; fi
@@ -1419,38 +1469,38 @@ if [ ${#WANTED[@]} -eq 0 ]; then
 		fi
 		flags=""
 		for fl in -Wall -Wextra -Werror; do grep -q -- "$fl" "$DIR/Makefile" || flags+="$fl "; done
-		if [ -z "$flags" ]; then line_ok "flags"; else line_ko "flags"; msg "flags manquants : $flags"; fi
+		if [ -z "$flags" ]; then line_ok "flags"; else line_ko "flags"; msg "missing flags: $flags"; fi
 	fi
 
-	section "Rendu"
+	section "Submission"
 	if [ -f "$DIR/README.md" ]; then
 		if head -1 "$DIR/README.md" | grep -qE '^[*_]This project has been created as part of the 42 curriculum by .+[*_][[:space:]]*$'; then
 			line_ok "README.md"
 		else
-			line_ko "README.md"; msg "1re ligne attendue en italique : *This project has been created as part of the 42 curriculum by <login>.*"
+			line_ko "README.md"; msg "first line must be in italics: *This project has been created as part of the 42 curriculum by <login>.*"
 		fi
 	else
-		line_ko "README.md"; msg "README.md absent (obligatoire)"
+		line_ko "README.md"; msg "README.md missing (mandatory)"
 	fi
 	extra=""
 	for f in "$DIR"/*.c; do
 		fn=$(basename "$f" .c)
 		[ -n "${PROTO[$fn]}" ] || extra+="$fn.c "
 	done
-	if [ -z "$extra" ]; then line_ok "fichiers"
+	if [ -z "$extra" ]; then line_ok "files"
 	else
-		line_ko "fichiers"; msg "fichiers hors sujet (« Submitting unused files is not allowed ») : $extra"
+		line_ko "files"; msg "files that are not in the subject (\"Submitting unused files is not allowed\"): $extra"
 	fi
 	if command -v norminette > /dev/null 2>&1; then
 		nerr=$(cd "$DIR" && norminette *.c *.h 2>&1 | grep -E ': Error!' | sed -E 's/: Error!//' | tr '\n' ' ')
 		if [ -z "$nerr" ]; then line_ok "norminette"
-		else line_ko "norminette"; msg "erreurs dans : $nerr"; fi
+		else line_ko "norminette"; msg "errors in: $nerr"; fi
 	else
-		line_skip "norminette" "non installée"
+		line_skip "norminette" "not installed"
 	fi
 fi
 
-# --------------------------------- Fonctions -------------------------------- #
+# --------------------------------- Functions -------------------------------- #
 for part in 1 2 3; do
 	case $part in
 		1) LIST=("${PART1[@]}") ;;
@@ -1460,11 +1510,12 @@ for part in 1 2 3; do
 	printed=0
 	for fn in "${LIST[@]}"; do
 		wanted "$fn" || continue
-		[ $printed -eq 0 ] && section "Partie $part" && printed=1
+		[ $printed -eq 0 ] && section "Part $part" && printed=1
 		run_test "$fn"
 	done
 done
 
-printf "\n${B}Résultat :${N} ${G}%d OK${N}, ${R}%d KO${N}, ${D}%d non réalisé(s)${N}\n" \
+printf "\n${B}Result:${N} ${G}%d OK${N}, ${R}%d KO${N}, ${D}%d not done${N}\n" \
 	"$N_OK" "$N_KO" "$N_SKIP"
+disclaimer
 [ "$N_KO" -eq 0 ]
