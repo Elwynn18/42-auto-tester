@@ -6,12 +6,16 @@
 #      bash ../test_ft_printf.sh             -> test everything                #
 #      bash ../test_ft_printf.sh d x p       -> test only these conversions    #
 #      bash ../test_ft_printf.sh bonus       -> test only the bonus            #
-#      (groups: c s p d i u x X % mix | width - 0 . # + space combo)           #
+#      (groups: c s p d i u x X % mix fuzz robust                              #
+#               | width - 0 . # + space combo bfuzz)                           #
 #                                                                              #
 #  - On Windows (Git Bash), the script relaunches itself in WSL.               #
 #  - Your libftprintf.a is built with YOUR Makefile (make / make bonus),       #
 #    then each conversion is compared to the real printf (output AND return    #
 #    value) in a separate program: a crash does not block the rest.            #
+#  - Thousands of random formats are compared to the real printf, and the     #
+#    tester tries to break ft_printf: malloc() and write() failures, formats   #
+#    ending with '%', huge widths, NULL format, ...                            #
 #  - AddressSanitizer detects crashes, memory overflows and leaks.             #
 #  - Do NOT put this file in your repository.                                  #
 # **************************************************************************** #
@@ -74,12 +78,13 @@ fi
 TMP=$(mktemp -d /tmp/test_ft_printf.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
-N_OK=0; N_KO=0; N_SKIP=0
+N_OK=0; N_KO=0; N_SKIP=0; N_WARN=0
 
 lbl() { printf "%s%*s" "$1" $(( ${#1} < 20 ? 20 - ${#1} : 0 )) ""; }
 section() { printf "\n${B}== %s ==${N}\n" "$1"; }
 line_ok() { printf "  %s ${G}OK${N}%s\n" "$(lbl "$1")" "${2:+ ${D}$2${N}}"; N_OK=$((N_OK + 1)); }
 line_ko() { printf "  %s ${R}KO${N}\n" "$(lbl "$1")"; N_KO=$((N_KO + 1)); }
+line_warn() { printf "  %s ${Y}!!${N} %s\n" "$(lbl "$1")" "$2"; N_WARN=$((N_WARN + 1)); }
 line_skip() { printf "  %s ${D}-- %s${N}\n" "$(lbl "$1")" "$2"; N_SKIP=$((N_SKIP + 1)); }
 msg() { printf "      ${R}✗${N} %s\n" "$1"; }
 note() { printf "      ${D}%s${N}\n" "$1"; }
@@ -87,13 +92,14 @@ note() { printf "      ${D}%s${N}\n" "$1"; }
 first_error() { grep -m1 -E "error|erreur|undefined|No rule|\*\*\*" "$1" | sed -E 's|^.*/||; s/^[[:space:]]+//' | cut -c1-150; }
 
 # ------------------------------- Test groups -------------------------------- #
-MAND=(c s p d i u x X pct mix)
-BONUS=(width minus zero prec hash plus space combo)
+MAND=(c s p d i u x X pct mix fuzz robust)
+BONUS=(width minus zero prec hash plus space combo bfuzz)
 declare -A LABEL=(
 	[c]='%c' [s]='%s' [p]='%p' [d]='%d' [i]='%i' [u]='%u' [x]='%x' [X]='%X'
-	[pct]='%%' [mix]='mixed'
+	[pct]='%%' [mix]='mixed' [fuzz]='random formats' [robust]='robustness'
 	[width]='width (e.g. %5d)' [minus]="flag '-'" [zero]="flag '0'" [prec]="precision '.'"
 	[hash]="flag '#'" [plus]="flag '+'" [space]="flag ' '" [combo]='combinations'
+	[bfuzz]='random flags'
 )
 
 # Optional filter passed as arguments
@@ -114,7 +120,7 @@ for a in "$@"; do
 			a=${a#%}
 			if [ -n "${LABEL[$a]}" ]; then WANTED[$a]=1
 			else
-				echo "Unknown group: '$a'. Groups: c s p d i u x X % mix | bonus width - 0 . # + space combo" >&2
+				echo "Unknown group: '$a'. Groups: c s p d i u x X % mix fuzz robust | bonus width - 0 . # + space combo bfuzz" >&2
 				exit 1
 			fi ;;
 	esac
@@ -132,8 +138,11 @@ prelude() { cat <<'EOF'
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #ifdef __SANITIZE_ADDRESS__
 # include <sanitizer/asan_interface.h>
+# include <sanitizer/lsan_interface.h>
 #endif
 
 int	ft_printf(const char *, ...);
@@ -147,6 +156,20 @@ static char			g_got[1 << 17];
 static char			g_exp[1 << 17];
 static char			g_long[1001];
 static char			g_big[50001];
+static int			g_warn = 0;
+static int			g_mfail = 0;
+static int			g_mcount = 0;
+static const char	*g_fmt = "";
+
+/* rigged malloc: the g_mfail-th call returns NULL (linked with --wrap=malloc) */
+void	*__real_malloc(size_t size);
+void	*__wrap_malloc(size_t size)
+{
+	g_mcount++;
+	if (g_mfail > 0 && --g_mfail == 0)
+		return (NULL);
+	return (__real_malloc(size));
+}
 
 /* puts stdout back in place (after a capture) */
 static void	tst_restore(void)
@@ -171,6 +194,20 @@ static void	tst_fail(const char *fmt, ...)
 		return ;
 	}
 	printf("@@MSG ");
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+	printf("\n");
+}
+
+/* something to check by hand (not counted as KO) */
+static void	tst_warn(const char *fmt, ...)
+{
+	va_list	ap;
+
+	if (++g_warn > 4)
+		return ;
+	printf("@@WARN ");
 	va_start(ap, fmt);
 	vprintf(fmt, ap);
 	va_end(ap);
@@ -265,6 +302,71 @@ static void	tst_cmp(int r1, int n, int r2)
 	tst_r1 = ft_printf(__VA_ARGS__); tst_n = tst_end(); \
 	tst_cmp(tst_r1, tst_n, snprintf(g_exp, sizeof g_exp, __VA_ARGS__)); } while (0)
 #define T(...) TD("ft_printf(" #__VA_ARGS__ ")", __VA_ARGS__)
+
+/* makes each malloc of ft_printf(...) fail in turn: no crash, no leak,
+   and (like printf) the return value should be -1 */
+static char	g_mdesc[400];
+static int	g_mret_warned = 0;
+#define TM(desc, ...) do { int tst_cnt; int tst_r; CASE(desc); \
+	tst_begin(); g_mcount = 0; ft_printf(__VA_ARGS__); tst_cnt = g_mcount; tst_end(); \
+	for (int tst_k = 1; tst_k <= tst_cnt && tst_k <= 40; tst_k++) { \
+		snprintf(g_mdesc, sizeof g_mdesc, "malloc #%d fails in %s", tst_k, desc); \
+		CASE(g_mdesc); tst_begin(); g_mfail = tst_k; tst_r = ft_printf(__VA_ARGS__); \
+		g_mfail = 0; tst_end(); g_ok++; \
+		if (tst_r != -1 && !g_mret_warned++) \
+			tst_warn("%s → returns %d (printf returns -1 when malloc fails)", g_mdesc, tst_r); } \
+	} while (0)
+#define TMM(...) TM("ft_printf(" #__VA_ARGS__ ")", __VA_ARGS__)
+
+/* checks the leaks made when malloc fails (the others are reported at exit) */
+static void	tst_mleaks(void)
+{
+#ifdef __SANITIZE_ADDRESS__
+	if (__lsan_do_recoverable_leak_check())
+		tst_fail("memory leak when a malloc fails inside ft_printf (details below)");
+#endif
+}
+
+/* runs fn() in a child process, stdout on /dev/null (stderr too if quiet):
+   returns 0 (finished, *ret = what fn returned), 1 (crash), 2 (infinite loop) */
+static int	tst_child(int (*fn)(void), int quiet, int *ret)
+{
+	int		p[2];
+	int		st;
+	int		v = 0;
+	pid_t	pid;
+
+	if (pipe(p) != 0 || (pid = fork()) < 0)
+	{
+		perror("fork");
+		exit(1);
+	}
+	if (pid == 0)
+	{
+		int	dn = open("/dev/null", O_WRONLY);
+
+		close(p[0]);
+		dup2(dn, 1);
+		if (quiet)
+			dup2(dn, 2);
+		alarm(3);
+		v = fn();
+		if (write(p[1], &v, sizeof v) < 0)
+			_exit(1);
+		_exit(0);
+	}
+	close(p[1]);
+	waitpid(pid, &st, 0);
+	if (read(p[0], &v, sizeof v) != sizeof v)
+		v = 0;
+	close(p[0]);
+	if (WIFSIGNALED(st) && WTERMSIG(st) == SIGALRM)
+		return (2);
+	if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+		return (1);
+	*ret = v;
+	return (0);
+}
 
 static void	tst_on_death(void)
 {
@@ -483,9 +585,182 @@ static void	tst_g_mix(void)
 	T("%p%s%c%d", (void *)0, (char *)NULL, 'n', 0);
 	T("%s|%c|%d|%u", "fin", '!', 0, 0u);
 	TD("ft_printf(<1000-char text without %>)", g_long);
+	T("%d%s%c%x%X%u%i%p%%|%d%s%c%x%X%u%i%p%%|%d%s%c%x%X%u%i%p%%",
+		1, "a", 'b', 10u, 11u, 12u, -13, (void *)14,
+		INT_MIN, "", '\0', 0u, UINT_MAX, 0u, INT_MAX, (void *)0,
+		-1, (char *)NULL, 'z', 0xffu, 0xabcu, 42u, 0, (void *)&x);
+	{
+		char	*lf = malloc(20010);
+		char	bytes[256];
+		int		j = 0;
+		int		r1;
+		int		r2;
+		int		n;
+
+		/* 20000-char format, with conversions in the middle and at the end */
+		memset(lf, 'f', 20000);
+		memcpy(lf + 9998, "%d", 2);
+		strcpy(lf + 20000, "%s");
+		TD("ft_printf(<20000-char format with a %d in the middle and a %s at the end>)", lf, 42, "end");
+		free(lf);
+		/* every byte from 1 to 255 (except '%') as plain text */
+		for (int c = 1; c < 256; c++)
+			if (c != '%')
+				bytes[j++] = (char)c;
+		bytes[j] = 0;
+		TD("ft_printf(<every byte from 1 to 255 except %>)", bytes);
+		/* nothing may stay in a buffer once ft_printf has returned */
+		CASE("ft_printf(\"abc\"), write(1, \"|\", 1), ft_printf(\"%d\", 42), write(1, \"|\", 1)");
+		tst_begin();
+		r1 = ft_printf("abc");
+		if (write(1, "|", 1) != 1)
+			perror("write");
+		r2 = ft_printf("%d", 42);
+		if (write(1, "|", 1) != 1)
+			perror("write");
+		n = tst_end();
+		if (n != 7 || memcmp(g_got, "abc|42|", 7) || r1 != 3 || r2 != 2)
+			tst_fail("%s → %s (returns %d and %d), expected \"abc|42|\" (returns 3 and 2): "
+				"ft_printf must write everything before returning (no buffer kept between calls)",
+				g_case, tst_qn(g_got, n), r1, r2);
+		else
+			g_ok++;
+	}
 }
 EOF
 	;;
+
+robust) cat <<'EOF'
+static int	tst_fn_int(void)
+{
+	return (ft_printf(g_fmt, 42, 42, 42));
+}
+
+static int	tst_fn_str(void)
+{
+	return (ft_printf(g_fmt, "abc", "abc"));
+}
+
+static int	tst_fn_null(void)
+{
+	return (ft_printf(NULL));
+}
+
+static int	(*g_fn)(void) = tst_fn_int;
+
+static int	tst_fn_closed(void)
+{
+	close(1);
+	return (g_fn());
+}
+
+static int	tst_fn_full(void)
+{
+	int	fd = open("/dev/full", O_WRONLY);
+
+	dup2(fd, 1);
+	return (g_fn());
+}
+
+/* undefined behaviour: the output does not matter, but ft_printf must not
+   crash, loop or read past the end of the format (allocated at its exact size) */
+static void	tst_ub(const char *f)
+{
+	char	d[200];
+	char	*h = malloc(strlen(f) + 1);
+	int		r;
+	int		res;
+
+	strcpy(h, f);
+	g_fmt = h;
+	snprintf(d, sizeof d, "ft_printf(%s)", tst_qn(f, strlen(f)));
+	CASE(d);
+	res = tst_child(tst_fn_int, 0, &r);
+	if (res == 1)
+		tst_fail("%s: crash (undefined behaviour, but the real printf does not crash)", d);
+	else if (res == 2)
+		tst_fail("%s: infinite loop (undefined behaviour, but the real printf returns)", d);
+	else
+		g_ok++;
+	free(h);
+}
+
+/* write() fails: printf returns -1 (C standard: "a negative value if an
+   output error occurred") */
+static void	tst_write_fail(int (*mode)(void), const char *how)
+{
+	const char	*f[] = {"hello", "%d", "%c", "%x", "%u", "%%", "abc%ixyz", "%s", "%p"};
+	char		d[200];
+	char		bad[300] = "";
+	int			r;
+	int			res;
+
+	for (int k = 0; k < 9; k++)
+	{
+		g_fmt = f[k];
+		g_fn = k < 7 ? tst_fn_int : tst_fn_str;
+		snprintf(d, sizeof d, "ft_printf(%s) when write() fails (%s)", tst_qn(f[k], strlen(f[k])), how);
+		CASE(d);
+		res = tst_child(mode, 0, &r);
+		if (res == 1)
+			tst_fail("%s: crash", d);
+		else if (res == 2)
+			tst_fail("%s: infinite loop", d);
+		else
+		{
+			g_ok++;
+			if (r != -1 && strlen(bad) < 200)
+				snprintf(bad + strlen(bad), sizeof bad - strlen(bad), "%s%s → %d",
+					*bad ? ", " : "", tst_qn(f[k], strlen(f[k])), r);
+		}
+	}
+	if (*bad)
+		tst_warn("when write() fails (%s), printf returns -1; your ft_printf returns: %s", how, bad);
+}
+
+static void	tst_g_robust(void)
+{
+	const char	*ub[] = {"%", "abc%", "%%%", "abc%%%", "%k", "abc%kdef", "%5", "% ",
+		"%-", "%.", "%#", "%+", "%0", "%-5", "%.3", "%05.3", "%#0-+ 5.3", "%-%", "%l", "%ld", "%lld",
+		"%hhd", "%zu", "%5%", "%-5%", "%\n"};
+	int			x = 0;
+	int			r;
+	int			res;
+
+	for (size_t k = 0; k < sizeof ub / sizeof *ub; k++)
+		tst_ub(ub[k]);
+	CASE("ft_printf(NULL)");
+	res = tst_child(tst_fn_null, 1, &r);
+	if (res == 2)
+		tst_fail("ft_printf(NULL): infinite loop");
+	else if (res == 1)
+		tst_warn("ft_printf(NULL) crashes (undefined behaviour; glibc's printf returns -1)");
+	else
+		g_ok++;
+	tst_write_fail(tst_fn_closed, "stdout closed");
+	if (access("/dev/full", W_OK) == 0)
+		tst_write_fail(tst_fn_full, "stdout = /dev/full");
+	/* each malloc fails in turn: no crash, no leak */
+	TMM("hello");
+	TMM("%c", 'a');
+	TMM("%s", "hello");
+	TMM("%s", (char *)NULL);
+	TMM("%p", (void *)&x);
+	TMM("%p", (void *)0);
+	TMM("%d", INT_MIN);
+	TMM("%i", 42);
+	TMM("%u", UINT_MAX);
+	TMM("%x", 0xabcdefu);
+	TMM("%X", 0xabcdefu);
+	TMM("%%");
+	TMM("%c%s%p%d%i%u%x%X%%", 'a', "bc", (void *)0xff, -1, 2, 3u, 255u, 255u);
+	TMM("%s %s %s %d %d %d", "a", "b", "c", 1, 2, 3);
+	tst_mleaks();
+}
+EOF
+	;;
+
+fuzz|bfuzz) fuzz_src "$1" ;;
 
 width) cat <<'EOF'
 static void	tst_g_width(void)
@@ -512,6 +787,19 @@ static void	tst_g_width(void)
 	T("[%8X]", 0xabcu);
 	T("[%2x]", 0xabcdefu);
 	T("[%5d][%3d]", 0, 7);
+	/* big widths: no fixed-size buffer */
+	T("[%300d]", 42);
+	T("[%300d]", INT_MIN);
+	T("[%300u]", UINT_MAX);
+	T("[%300x]", 0xabcu);
+	T("[%300X]", 0xabcu);
+	T("[%300c]", 'z');
+	T("[%300s]", "abc");
+	T("[%300p]", (void *)&x);
+	T("[%300p]", (void *)0);
+	T("[%1500s]", g_long);
+	T("[%5000i]", -7);
+	T("[%50000c]", '!');
 }
 EOF
 	;;
@@ -540,6 +828,12 @@ static void	tst_g_minus(void)
 	T("[%-8x]", 0xabcu);
 	T("[%-8X]", 0xabcu);
 	T("[%-5d][%5d]", 1, 2);
+	T("[%-300d]", -42);
+	T("[%-300s]", (char *)NULL);
+	T("[%-300c]", '\0');
+	T("[%-300p]", (void *)&x);
+	T("[%-5000x]", UINT_MAX);
+	T("[%-1500s]", g_long);
 }
 EOF
 	;;
@@ -564,6 +858,11 @@ static void	tst_g_zero(void)
 	T("[%05.3d]", 42);
 	T("[%05.0d]", 0);
 	T("[%08.5x]", 0xabu);
+	T("[%0300d]", -42);
+	T("[%0300i]", INT_MIN);
+	T("[%0300u]", 42u);
+	T("[%0300X]", 0xabcu);
+	T("[%05d|%5d|%-5d|%05d]", -1, -1, -1, -1);
 }
 EOF
 	;;
@@ -602,6 +901,21 @@ static void	tst_g_prec(void)
 	T("[%10.5i]", -42);
 	T("[%3.5d]", 42);
 	T("[%10.8x]", 0xabcu);
+	T("[%.300d]", 42);
+	T("[%.300d]", INT_MIN);
+	T("[%.300i]", 0);
+	T("[%.5000u]", UINT_MAX);
+	T("[%.3000x]", 0xabcu);
+	T("[%.300X]", 0u);
+	T("[%.999s]", g_long);
+	T("[%.1000s]", g_long);
+	T("[%.2000s]", g_long);
+	T("[%400.300d]", -42);
+	T("[%-400.300X]", 0xabcu);
+	T("[%.6s|%.7s|%.0s]", (char *)NULL, (char *)NULL, "");
+	T("[%.0d|%.0i|%.0u|%.0x|%.0X]", 0, 0, 0u, 0u, 0u);
+	T("[%3.0d|%-3.0u|%3.0x]", 0, 0u, 0u);
+	T("[%.00d|%.001d]", 0, 0);
 }
 EOF
 	;;
@@ -623,6 +937,13 @@ static void	tst_g_hash(void)
 	T("[%#5.0x]", 0u);
 	T("[%#8.5X]", 0xabu);
 	T("[%#x %#X]", 1u, 1u);
+	T("[%#300x]", 42u);
+	T("[%#-300X]", 42u);
+	T("[%#0300x]", 42u);
+	T("[%#.300x]", 42u);
+	T("[%#x|%x|%#x]", 1u, 1u, 0u);
+	T("[%#-10.0x]", 0u);
+	T("[%#010.0x]", 0u);
 }
 EOF
 	;;
@@ -645,6 +966,10 @@ static void	tst_g_plus(void)
 	T("[%+.0d]", 0);
 	T("[%+5.0d]", 0);
 	T("[%+d %+i]", 1, -1);
+	T("[%+300d]", 42);
+	T("[%+.300d]", -42);
+	T("[%+0300i]", 0);
+	T("[%+d|%d|%+d]", 1, 1, 0);
 }
 EOF
 	;;
@@ -667,6 +992,10 @@ static void	tst_g_space(void)
 	T("[%+ d]", 42);
 	T("[%  d]", 42);
 	T("[% 5.0d]", 0);
+	T("[% 300d]", 42);
+	T("[% .300d]", -42);
+	T("[% 0300i]", 7);
+	T("[% d|%d|% d]", 1, 1, 0);
 }
 EOF
 	;;
@@ -685,14 +1014,252 @@ static void	tst_g_combo(void)
 	T("[%.0s%.0d%.0x]", "abc", 0, 0u);
 	T("[%-+8.4d|%-#8.4x|%- 8.4i]", 5, 5u, 5);
 	T("[%010u|%-10u|%.10u]", 42u, 42u, 42u);
+	/* flags must not leak to the next conversion */
+	T("[%-5d|%d|%05d|%d|%.3d|%d|%+d|%d|% d|%d|%#x|%x]", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11u, 12u);
+	T("[%10s|%s|%.2s|%s|%-4c|%c]", "ab", "cd", "efgh", "ij", 'k', 'l');
+	/* each malloc fails in turn: no crash, no leak */
+	TMM("[%-10s|%05d|%#x|%+d|% i|%.2s|%10p]", "abc", 42, 255u, 7, 8, "hello", (void *)0xff);
+	TMM("[%300d]", 42);
+	TMM("[%-300s]", "abc");
+	TMM("[%.300x]", 42u);
+	TMM("[%#020X|%-20u|%020i]", 42u, 42u, -42);
+	tst_mleaks();
 }
 EOF
 	;;
 esac
 }
 
+# Random formats compared to printf (fuzz: mandatory, bfuzz: with flags)
+fuzz_src() {
+	local a b c
+	if [ -z "$FUZZ_DONE" ]; then
+		FUZZ_DONE=1
+		cat <<'EOF'
+typedef struct s_tv
+{
+	int			i;
+	unsigned	u;
+	const char	*s;
+	void		*p;
+	char		conv;
+}	t_tv;
+
+static unsigned	g_fs = 1;
+static int		g_fx = 0;
+static char		g_fcase[1024];
+
+static unsigned	fz_rnd(void)
+{
+	g_fs = g_fs * 1103515245u + 12345u;
+	return ((g_fs >> 8) & 0xffffff);
+}
+
+static unsigned	fz_rnd32(void)
+{
+	return ((fz_rnd() << 16) ^ fz_rnd());
+}
+
+static void	fz_text(char *f)
+{
+	const char	*set = "abcXYZ 0123456789-+.:|#_\n\t";
+	size_t		n = strlen(f);
+	int			k = fz_rnd() % 5 == 0 ? fz_rnd() % 7 : 0;
+
+	while (k-- > 0)
+		f[n++] = set[fz_rnd() % strlen(set)];
+	if (fz_rnd() % 12 == 0)
+	{
+		f[n++] = '%';
+		f[n++] = '%';
+	}
+	f[n] = 0;
+}
+
+static int	fz_int(void)
+{
+	const int	t[] = {0, 1, -1, 9, -9, 10, -10, 42, -42, 100, 999, -1000,
+		12345, INT_MAX, INT_MIN, INT_MAX - 1, INT_MIN + 1};
+	int			k = fz_rnd() % 20;
+
+	if (k < 17)
+		return (t[k]);
+	return (k == 17 ? (int)fz_rnd32() : (int)(fz_rnd() % 2001) - 1000);
+}
+
+static unsigned	fz_uint(void)
+{
+	const unsigned	t[] = {0, 1, 9, 10, 15, 16, 255, 256, 4095, 4096, 0xabcdef,
+		0xdeadbeef, INT_MAX, 2147483648u, UINT_MAX};
+	int				k = fz_rnd() % 18;
+
+	if (k < 15)
+		return (t[k]);
+	return (k == 15 ? fz_rnd32() : fz_rnd() % 5000);
+}
+
+/* appends a random conversion; returns the type of its argument
+   (0 int, 1 unsigned, 2 string, 3 pointer), -1 for %% */
+static int	fz_conv(char *f, int bonus, t_tv *v)
+{
+	const char	*convs = "cspdiuxX%";
+	const char	*strs[] = {"", "a", "hello", "Hello, World!", "  sp  ", "%d %s %%",
+		"\t\n", "caf\xc3\xa9", g_long, NULL};
+	void		*ptrs[] = {NULL, &g_fx, (void *)1, (void *)0xff, (void *)0xdeadbeef,
+		(void *)LONG_MAX, (void *)LONG_MIN, (void *)ULONG_MAX, g_big};
+	const char	*chars = "aZ0 ~\n\t";
+	char		c = convs[fz_rnd() % 9];
+	char		*p = f + strlen(f);
+	const char	*fl = "";
+	int			prec = -1;
+
+	*p++ = '%';
+	if (bonus && c != '%')
+	{
+		char	set[8];
+		int		n = 0;
+
+		fl = c == 'd' || c == 'i' ? "-0+ " : c == 'u' ? "-0" : c == 'x' || c == 'X' ? "-0#" : "-";
+		for (int k = 0; fl[k]; k++)
+			if (fz_rnd() % 3 == 0)
+				set[n++] = fl[k];
+		for (int k = n - 1; k > 0; k--)
+		{
+			int		j = fz_rnd() % (k + 1);
+			char	t = set[k];
+
+			set[k] = set[j];
+			set[j] = t;
+		}
+		if (n > 0 && fz_rnd() % 15 == 0)
+			set[n++] = set[0];
+		memcpy(p, set, n);
+		p += n;
+		if (fz_rnd() % 2)
+			p += sprintf(p, "%u", fz_rnd() % 8 ? 1 + fz_rnd() % 20 : 20 + fz_rnd() % 60);
+		if (c != 'c' && c != 'p' && fz_rnd() % 5 < 2)
+		{
+			if (fz_rnd() % 4 == 0)
+				prec = 0;
+			else
+				prec = fz_rnd() % 8 ? fz_rnd() % 15 : fz_rnd() % 60;
+			p += prec == 0 && fz_rnd() % 2 ? sprintf(p, ".") : sprintf(p, ".%d", prec);
+		}
+	}
+	*p++ = c;
+	*p = 0;
+	v->conv = c;
+	if (c == '%')
+		return (-1);
+	if (c == 'c')
+		v->i = fz_rnd() % 9 < 7 ? chars[fz_rnd() % 7] : fz_rnd() % 2 ? 0 : 200;
+	else if (c == 's')
+	{
+		v->s = strs[fz_rnd() % 10];
+		if (!v->s && prec >= 0 && prec < 6)
+			v->s = "null";
+		return (2);
+	}
+	else if (c == 'p')
+	{
+		v->p = ptrs[fz_rnd() % 9];
+		return (3);
+	}
+	else if (c == 'd' || c == 'i')
+		v->i = fz_int();
+	else
+	{
+		v->u = fz_uint();
+		return (1);
+	}
+	return (0);
+}
+
+/* "ft_printf("fmt", args)" for the report */
+static void	fz_desc(const char *f, const t_tv *v, int n)
+{
+	int	j = snprintf(g_fcase, sizeof g_fcase, "ft_printf(%s", tst_qn(f, strlen(f)));
+
+	for (int k = 0; k < n && j < 900; k++)
+	{
+		if (v[k].conv == 's' && v[k].s == g_long)
+			j += snprintf(g_fcase + j, sizeof g_fcase - j, ", <1000-char string>");
+		else if (v[k].conv == 's')
+			j += snprintf(g_fcase + j, sizeof g_fcase - j, ", %s", tst_qn(v[k].s, v[k].s ? strlen(v[k].s) : 0));
+		else if (v[k].conv == 'p' && !v[k].p)
+			j += snprintf(g_fcase + j, sizeof g_fcase - j, ", NULL");
+		else if (v[k].conv == 'p')
+			j += snprintf(g_fcase + j, sizeof g_fcase - j, ", (void *)%#lx", (unsigned long)v[k].p);
+		else if (v[k].conv == 'c' && v[k].i > 32 && v[k].i < 127)
+			j += snprintf(g_fcase + j, sizeof g_fcase - j, ", '%c'", v[k].i);
+		else if (v[k].conv == 'c' || v[k].conv == 'd' || v[k].conv == 'i')
+			j += snprintf(g_fcase + j, sizeof g_fcase - j, ", %d", v[k].i);
+		else
+			j += snprintf(g_fcase + j, sizeof g_fcase - j, ", %uu", v[k].u);
+	}
+	snprintf(g_fcase + j, sizeof g_fcase - j, ")");
+}
+
+#define FZ_0(k) v[k].i
+#define FZ_1(k) v[k].u
+#define FZ_2(k) v[k].s
+#define FZ_3(k) v[k].p
+
+static void	fz_call(const char *f, const int *t, const t_tv *v)
+{
+	switch (t[0] * 16 + t[1] * 4 + t[2])
+	{
+EOF
+		for a in 0 1 2 3; do for b in 0 1 2 3; do for c in 0 1 2 3; do
+			printf '\t\tcase %d: TD(g_fcase, f, FZ_%d(0), FZ_%d(1), FZ_%d(2)); break;\n' \
+				$((a * 16 + b * 4 + c)) $a $b $c
+		done; done; done
+		cat <<'EOF'
+	}
+}
+
+/* count random formats of 1 to 3 conversions, with random text around */
+static void	fz_run(unsigned seed, int count, int bonus)
+{
+	char	f[512];
+	t_tv	v[3];
+	int		t[3];
+	int		n;
+	int		nconv;
+
+	g_fs = seed;
+	for (int it = 0; it < count; it++)
+	{
+		memset(v, 0, sizeof v);
+		memset(t, 0, sizeof t);
+		f[0] = 0;
+		n = 0;
+		nconv = 1 + fz_rnd() % 3;
+		fz_text(f);
+		for (int k = 0; k < nconv; k++)
+		{
+			int	ty = fz_conv(f, bonus, &v[n]);
+
+			if (ty >= 0)
+				t[n++] = ty;
+			fz_text(f);
+		}
+		fz_desc(f, v, n);
+		fz_call(f, t, v);
+	}
+}
+EOF
+	fi
+	if [ "$1" = fuzz ]; then
+		printf 'static void\ttst_g_fuzz(void)\n{\n\tfz_run(42, 3000, 0);\n}\n'
+	else
+		printf 'static void\ttst_g_bfuzz(void)\n{\n\tfz_run(4242, 8000, 1);\n}\n'
+	fi
+}
+
 # C source of a test program for the given groups
 gen_src() {
+	FUZZ_DONE=""
 	prelude
 	for g in "$@"; do body "$g"; done
 	printf 'static void\ttst_run(void)\n{\n'
@@ -741,10 +1308,10 @@ asan_report() {
 # -------------------------- Running a test program -------------------------- #
 # run_group <label> <name> <libftprintf.a folder> <groups...>
 run_group() {
-	local label=$1 name=$2 lib=$3 src="$TMP/t_$2.c" bin="$TMP/t_$2" out rc res ok ko
+	local label=$1 name=$2 lib=$3 src="$TMP/t_$2.c" bin="$TMP/t_$2" out rc res ok ko warns
 	shift 3
 	gen_src "$@" > "$src"
-	if ! cc $SAN -g -w "$src" -o "$bin" -L"$lib" -lftprintf 2> "$TMP/cerr"; then
+	if ! cc $SAN -g -w "$src" -o "$bin" -L"$lib" -lftprintf -Wl,--wrap=malloc 2> "$TMP/cerr"; then
 		line_ko "$label"
 		if grep -q "undefined reference to .ft_printf'" "$TMP/cerr"; then
 			msg "ft_printf not found in libftprintf.a"
@@ -755,22 +1322,29 @@ run_group() {
 		fi
 		return
 	fi
-	out=$(cd "$TMP" && ASAN_OPTIONS="detect_leaks=1" timeout 10 "$bin" 2> "$TMP/rerr")
+	out=$(cd "$TMP" && ASAN_OPTIONS="detect_leaks=1:allocator_may_return_null=1" timeout 30 "$bin" 2> "$TMP/rerr")
 	rc=$?
 	res=$(grep -m1 "^@@RESULT" <<< "$out")
 	ok=$(awk '{print $2}' <<< "$res"); ko=$(awk '{print $3}' <<< "$res")
+	warns=$(grep "^@@WARN " <<< "$out" | sed 's/^@@WARN //')
 	if [ -n "$res" ] && [ "$ko" = 0 ] && ! grep -q "Sanitizer" "$TMP/rerr"; then
-		line_ok "$label" "($ok tests)"
+		if [ -n "$warns" ]; then
+			line_warn "$label" "check by hand ($ok tests passed)"
+			while IFS= read -r m; do note "$m"; done <<< "$warns"
+		else
+			line_ok "$label" "($ok tests)"
+		fi
 		return
 	fi
 	line_ko "$label"
 	grep "^@@MSG " <<< "$out" | sed 's/^@@MSG //' | while IFS= read -r m; do msg "$m"; done
 	if [ $rc -eq 124 ]; then
-		msg "infinite loop (10 s timeout) during: $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
+		msg "infinite loop (30 s timeout) during: $(grep "^@@CRASH" <<< "$out" | tail -1 | sed 's/^@@CRASH //')"
 	elif [ -z "$res" ]; then
-		msg "crash during: $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
+		msg "crash during: $(grep "^@@CRASH" <<< "$out" | tail -1 | sed 's/^@@CRASH //')"
 	fi
 	asan_report "$TMP/rerr" "$src"
+	[ -n "$warns" ] && while IFS= read -r m; do note "!! $m"; done <<< "$warns"
 }
 
 # --------------------------- Building the library --------------------------- #
@@ -980,7 +1554,7 @@ if want_any "${BONUS[@]}"; then
 	fi
 fi
 
-printf "\n${B}Result:${N} ${G}%d OK${N}, ${R}%d KO${N}, ${D}%d skipped${N}\n" \
-	"$N_OK" "$N_KO" "$N_SKIP"
+printf "\n${B}Result:${N} ${G}%d OK${N}, ${R}%d KO${N}, ${Y}%d warning(s)${N}, ${D}%d skipped${N}\n" \
+	"$N_OK" "$N_KO" "$N_WARN" "$N_SKIP"
 disclaimer
 [ "$N_KO" -eq 0 ]

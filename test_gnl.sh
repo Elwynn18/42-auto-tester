@@ -9,8 +9,9 @@
 #  - On Windows (Git Bash), the script relaunches itself in WSL.               #
 #  - Your files are compiled with several BUFFER_SIZEs (from 1 to 10000000),   #
 #    each size in a separate program: a crash does not block the others.       #
-#  - Files, stdin, pipes, invalid fds, read() and malloc() errors are tested;  #
-#    the bonus is tested with several fds read in turn.                        #
+#  - Files, stdin, pipes, invalid fds, read() and malloc() errors, short      #
+#    reads, BUFFER_SIZE <= 0 and fd 1023 are tested; the bonus is tested with  #
+#    up to 200 fds read in turn and a read() error on a single fd.             #
 #  - AddressSanitizer detects crashes, memory overflows and leaks.             #
 #  - Do NOT put this file in your repository.                                  #
 # **************************************************************************** #
@@ -74,14 +75,16 @@ TMP=$(mktemp -d /tmp/test_gnl.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/strict" "$TMP/run"
 
-N_OK=0; N_KO=0; N_SKIP=0
+N_OK=0; N_KO=0; N_SKIP=0; N_WARN=0
 
 lbl() { printf "%s%*s" "$1" $(( ${#1} < 30 ? 30 - ${#1} : 0 )) ""; }
 section() { printf "\n${B}== %s ==${N}\n" "$1"; }
 line_ok() { printf "  %s ${G}OK${N}%s\n" "$(lbl "$1")" "${2:+ ${D}$2${N}}"; N_OK=$((N_OK + 1)); }
 line_ko() { printf "  %s ${R}KO${N}\n" "$(lbl "$1")"; N_KO=$((N_KO + 1)); }
+line_warn() { printf "  %s ${Y}!!${N} %s\n" "$(lbl "$1")" "$2"; N_WARN=$((N_WARN + 1)); }
 line_skip() { printf "  %s ${D}-- %s${N}\n" "$(lbl "$1")" "$2"; N_SKIP=$((N_SKIP + 1)); }
 msg() { printf "      ${R}✗${N} %s\n" "$1"; }
+note() { printf "      ${D}%s${N}\n" "$1"; }
 # "erreur" also matches gcc messages in a French locale
 first_error() { grep -m1 -E "error|erreur|undefined" "$1" | sed -E 's|^.*/||; s/^[[:space:]]+//' | cut -c1-150; }
 
@@ -113,6 +116,7 @@ harness() { cat <<'EOF'
 #include <stdarg.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #ifdef __SANITIZE_ADDRESS__
 # include <sanitizer/asan_interface.h>
 # include <sanitizer/lsan_interface.h>
@@ -124,30 +128,63 @@ static int			g_ok = 0;
 static int			g_ko = 0;
 static const char	*g_case = "start of the test";
 static int			g_malloc_fail = 0;
+static int			g_malloc_count = 0;
+static long			g_live = 0;
 static int			g_read_fail = 0;
+static int			g_read_fail_fd = -1;
+static int			g_read_short = 0;
+static unsigned		g_read_seed = 1;
+static long			g_read_bytes = 0;
 static int			g_leak_seen = 0;
+static int			g_warn = 0;
 
-/* rigged malloc: the g_malloc_fail-th call returns NULL */
+/* rigged malloc: the g_malloc_fail-th call returns NULL; g_live counts the
+   blocks not freed yet */
 void	*__real_malloc(size_t size);
 void	*__wrap_malloc(size_t size)
 {
+	void	*p;
+
+	g_malloc_count++;
 	if (g_malloc_fail > 0 && --g_malloc_fail == 0)
 		return (NULL);
-	return (__real_malloc(size));
+	p = __real_malloc(size);
+	if (p)
+		g_live++;
+	return (p);
 }
 #define FAIL_MALLOC(n) (g_malloc_fail = (n))
 #define MALLOC_TRIGGERED() (g_malloc_fail == 0)
 
-/* rigged read: returns -1 while g_read_fail is 1 */
+void	__real_free(void *p);
+void	__wrap_free(void *p)
+{
+	if (p)
+		g_live--;
+	__real_free(p);
+}
+
+/* rigged read: returns -1 while g_read_fail is 1 (on every fd, or only on
+   g_read_fail_fd); with g_read_short, returns fewer bytes than asked */
 ssize_t	__real_read(int fd, void *buf, size_t n);
 ssize_t	__wrap_read(int fd, void *buf, size_t n)
 {
-	if (g_read_fail)
+	ssize_t	r;
+
+	if (g_read_fail && (g_read_fail_fd < 0 || fd == g_read_fail_fd))
 	{
 		errno = EIO;
 		return (-1);
 	}
-	return (__real_read(fd, buf, n));
+	if (g_read_short && n > 1)
+	{
+		g_read_seed = g_read_seed * 1103515245u + 12345u;
+		n = 1 + (g_read_seed >> 8) % (g_read_seed & 1 ? (n < 5 ? n : 5) : n);
+	}
+	r = __real_read(fd, buf, n);
+	if (r > 0)
+		g_read_bytes += r;
+	return (r);
 }
 
 #define CASE(d) (g_case = (d))
@@ -164,6 +201,20 @@ static void	tst_fail(const char *fmt, ...)
 		return ;
 	}
 	printf("@@MSG ");
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+	printf("\n");
+}
+
+/* something to check by hand (not counted as KO) */
+static void	tst_warn(const char *fmt, ...)
+{
+	va_list	ap;
+
+	if (++g_warn > 3)
+		return ;
+	printf("@@WARN ");
 	va_start(ap, fmt);
 	vprintf(fmt, ap);
 	va_end(ap);
@@ -254,6 +305,7 @@ static int	tst_lines(int fd, const char *name, const char *content, size_t len)
 	size_t		pos = 0;
 	size_t		e;
 	int			n = 0;
+	long		live = g_live;
 	char		*got;
 
 	while (pos < len)
@@ -290,6 +342,15 @@ static int	tst_lines(int fd, const char *name, const char *content, size_t len)
 		}
 	}
 	g_ok++;
+	if (g_live > live && !g_read_short)
+	{
+		static int	warned = 0;
+
+		if (!warned++)
+			tst_warn("%s: once get_next_line has returned NULL, %ld block(s) it allocated are "
+				"still not freed (valgrind: \"still reachable\"); free everything at the end of the file",
+				name, g_live - live);
+	}
 	return (1);
 }
 
@@ -438,21 +499,38 @@ static void	tst_read_error(void)
 	tst_leaks("read error");
 }
 
+static char	*tst_fill(char ch, size_t n, const char *end, size_t *len);
+static char	*tst_gen(size_t nlines, size_t maxlen, unsigned seed, size_t *len);
+static char	*tst_around(size_t *len);
+
+/* every malloc of the call fails in turn (1st, 2nd, ... allocation) */
 static void	tst_malloc_fail(void)
 {
-	const char	*c = "line 01\nline 02\nline 03\n";
-	const char	*l[] = {"line 01\n", "line 02\n"};
-	char		d[160];
+	const char	*c = "line 01\nline 02\nlast line";
+	const char	*l[] = {"line 01\n", "line 02\n", "last line", NULL};
+	const char	*what[] = {"the 1st line", "the 2nd line", "the last line (no \\n)",
+		"the call after the last line"};
+	char		d[200];
 	char		*got;
 	int			fd;
+	int			cnt;
 
-	for (int step = 0; step <= 1; step++)
-		for (int n = 1; n <= 6; n++)
+	for (int step = 0; step < 4; step++)
+	{
+		fd = tst_open("tst_file.txt", c, strlen(c));
+		for (int j = 0; j < step; j++)
+			free(get_next_line(fd));
+		g_malloc_count = 0;
+		free(get_next_line(fd));
+		cnt = g_malloc_count;
+		tst_drain(fd);
+		close(fd);
+		for (int n = 1; n <= cnt && n <= 60; n++)
 		{
 			fd = tst_open("tst_file.txt", c, strlen(c));
-			if (step == 1)
+			for (int j = 0; j < step; j++)
 				free(get_next_line(fd));
-			snprintf(d, sizeof d, "malloc #%d fails while reading line %d", n, step + 1);
+			snprintf(d, sizeof d, "malloc #%d (of %d) fails while reading %s", n, cnt, what[step]);
 			CASE(d);
 			FAIL_MALLOC(n);
 			got = get_next_line(fd);
@@ -460,17 +538,111 @@ static void	tst_malloc_fail(void)
 			{
 				FAIL_MALLOC(0);
 				/* expected: NULL (a correct line is tolerated) */
-				if (got && strcmp(got, l[step]))
+				if (got && (!l[step] || strcmp(got, l[step])))
 					tst_fail("%s → %s, expected NULL", d, Q(got));
 				else
 					g_ok++;
 			}
 			FAIL_MALLOC(0);
 			free(got);
+			snprintf(d, sizeof d, "next calls after malloc #%d (of %d) failed while reading %s", n, cnt, what[step]);
+			CASE(d);
 			tst_drain(fd);
 			close(fd);
 		}
+	}
 	tst_leaks("malloc failures");
+}
+
+/* subject: "try to read as little as possible", "don't read the whole file
+   and then return each line" */
+static void	tst_read_little(void)
+{
+	size_t	len;
+	char	*s = tst_fill('r', 6300, "", &len);
+	char	*got;
+	int		fd;
+
+	for (size_t k = 20; k < len; k += 21)
+		s[k] = '\n';
+	fd = tst_open("tst_file.txt", s, len);
+	g_read_bytes = 0;
+	for (int k = 1; k <= 3; k++)
+	{
+		CASE("reads only what is needed");
+		got = get_next_line(fd);
+		free(got);
+		if ((size_t)(21 * k + BUFFER_SIZE) < len && g_read_bytes > 21 * k + BUFFER_SIZE)
+		{
+			tst_fail("after %d line(s) of 20 chars, read() has already returned %ld bytes "
+				"(at most %d expected): the subject says to stop reading as soon as a \\n is found",
+				k, g_read_bytes, 21 * k + BUFFER_SIZE);
+			break ;
+		}
+		if (k == 3)
+			g_ok++;
+	}
+	tst_drain(fd);
+	close(fd);
+	free(s);
+	tst_leaks("reads only what is needed");
+}
+
+/* read() returns fewer bytes than asked (allowed: pipes, terminals, ...) */
+static void	tst_short_reads(void)
+{
+	size_t	len;
+	char	*s;
+
+	g_read_short = 1;
+	s = tst_gen(300, 120, 7, &len);
+	tst_file("short reads (read() returns fewer bytes than asked): big file", s, len);
+	free(s);
+	if (BUFFER_SIZE <= 100000)
+	{
+		s = tst_around(&len);
+		tst_file("short reads: lines of BUFFER_SIZE-1, BUFFER_SIZE, BUFFER_SIZE+1 chars", s, len);
+		free(s);
+	}
+	FILE_STR("short reads: 3 lines without a final \\n", "line 01\nline 02\nline 03");
+	g_read_short = 0;
+}
+
+/* a file read through a high (but valid) fd */
+static void	tst_high_fd(void)
+{
+	const char		*c = "first line\nsecond line\nlast";
+	struct rlimit	rl;
+	int				hi = 1023;
+	int				fd;
+	char			d[200];
+	char			*got;
+
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 1024)
+		hi = (int)rl.rlim_cur - 1;
+	fd = tst_open("tst_file.txt", c, strlen(c));
+	if (dup2(fd, hi) < 0)
+	{
+		close(fd);
+		return ;
+	}
+	close(fd);
+	snprintf(d, sizeof d, "fd %d (valid: the fd limit is %d here): line 1", hi, hi + 1);
+	CASE(d);
+	got = get_next_line(hi);
+	if (!got)
+		tst_warn("%s → NULL: an fd up to %d can be opened, get_next_line should read it", d, hi);
+	else if (strcmp(got, "first line\n"))
+		tst_fail("%s → %s, expected \"first line\\n\"", d, Q(got));
+	else
+	{
+		snprintf(d, sizeof d, "fd %d", hi);
+		tst_lines(hi, d, c + 11, strlen(c + 11));
+	}
+	free(got);
+	tst_drain(hi);
+	close(hi);
+	tst_leaks("high fd");
 }
 
 /* ----- content generators ----- */
@@ -623,6 +795,100 @@ static void	tst_multi(const char *name, int nf, const char **c, const int *steps
 	tst_leaks(name);
 }
 
+/* many fds open at the same time, read in turn */
+static void	tst_many_fds(void)
+{
+	struct rlimit	rl;
+	int				nf = 200;
+	int				fd[200];
+	char			c[200][64];
+	char			fname[64];
+	char			d[200];
+	char			*got;
+	int				ok = 1;
+
+	if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 250)
+		nf = (int)rl.rlim_cur - 50;
+	for (int i = 0; i < nf; i++)
+	{
+		snprintf(c[i], sizeof c[i], "file %d: line 1\nfile %d: line 2\nfile %d: end", i, i, i);
+		snprintf(fname, sizeof fname, "tst_many%d.txt", i);
+		fd[i] = tst_open(fname, c[i], strlen(c[i]));
+	}
+	for (int l = 0; l < 4 && ok; l++)
+		for (int i = 0; i < nf && ok; i++)
+		{
+			char	exp[64];
+
+			if (l < 2)
+				snprintf(exp, sizeof exp, "file %d: line %d\n", i, l + 1);
+			else
+				snprintf(exp, sizeof exp, "file %d: end", i);
+			snprintf(d, sizeof d, "%d files open at the same time, read in turn: fd %d, %s",
+				nf, fd[i], l < 3 ? (l < 2 ? (l ? "line 2" : "line 1") : "line 3") : "call after the last line");
+			CASE(d);
+			got = get_next_line(fd[i]);
+			if (l < 3 ? !got || strcmp(got, exp) : got != NULL)
+			{
+				tst_fail("%s → %s, expected %s", d, Q(got), l < 3 ? Q(exp) : "NULL");
+				ok = 0;
+			}
+			free(got);
+		}
+	for (int i = 0; i < nf; i++)
+	{
+		if (!ok)
+			tst_drain(fd[i]);
+		close(fd[i]);
+	}
+	if (ok)
+		g_ok++;
+	tst_leaks("many fds");
+}
+
+/* a read() error on one fd must not touch the other fds */
+static void	tst_bonus_read_error(void)
+{
+	const char	*a = "a1\na2\na3\na4\na5\n";
+	const char	*la[] = {"a1\n", "a2\n", "a3\n", "a4\n", "a5\n"};
+	const char	*b = "b1\nb2\nb3\nb4\nb5";
+	int			fa = tst_open("tst_multi0.txt", a, strlen(a));
+	int			fb = tst_open("tst_multi1.txt", b, strlen(b));
+	int			k = 1;
+	int			bad = 0;
+	char		*got;
+
+	tst_expect(fa, "read error on fd A only: fd A, line 1", "a1\n");
+	tst_expect(fb, "read error on fd A only: fd B, line 1", "b1\n");
+	g_read_fail = 1;
+	g_read_fail_fd = fa;
+	CASE("read() returns -1 on fd A only: get_next_line(A) must return NULL");
+	while (!bad && k <= 5 && (got = get_next_line(fa)))
+	{
+		/* complete lines that were already read may still be returned */
+		if (k >= 5 || strcmp(got, la[k]))
+		{
+			tst_fail("read() returns -1 on fd A → get_next_line(A) returns %s instead of NULL", Q(got));
+			bad = 1;
+		}
+		k++;
+		free(got);
+	}
+	if (!bad)
+		g_ok++;
+	g_read_fail = 0;
+	g_read_fail_fd = -1;
+	if (bad)
+		tst_drain(fa);
+	close(fa);
+	tst_lines(fb, "read error on fd A, then the rest of fd B", b + 3, strlen(b) - 3);
+	close(fb);
+	fa = tst_open("tst_multi0.txt", a, strlen(a));
+	tst_lines(fa, "after a read error on fd A, reading the file again from the start", a, strlen(a));
+	close(fa);
+	tst_leaks("read error on one fd");
+}
+
 static void	tst_bonus(void)
 {
 	const char	*a = "a1\na2\na3\na4\n";
@@ -638,6 +904,8 @@ static void	tst_bonus(void)
 	tst_multi("stdin and a file in turn", 2, (const char *[]){a, c}, (int []){1, 1}, 1);
 	free(g1);
 	free(g2);
+	tst_many_fds();
+	tst_bonus_read_error();
 }
 #endif
 
@@ -653,6 +921,35 @@ static void	tst_on_signal(int sig)
 	_exit(128 + sig);
 }
 
+#ifdef TST_BS_BAD
+/* BUFFER_SIZE <= 0: nothing can be read, get_next_line must return NULL */
+int	main(void)
+{
+	int	fd;
+
+	setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef __SANITIZE_ADDRESS__
+	__asan_set_death_callback(tst_on_death);
+#else
+	signal(SIGSEGV, tst_on_signal);
+	signal(SIGBUS, tst_on_signal);
+	signal(SIGABRT, tst_on_signal);
+	signal(SIGFPE, tst_on_signal);
+#endif
+	signal(SIGTERM, tst_on_signal);
+	signal(SIGALRM, tst_on_signal);
+	alarm(5);
+	fd = tst_open("tst_file.txt", "abc\ndef\n", 8);
+	tst_expect(fd, "file \"abc\\ndef\\n\", 1st call", NULL);
+	tst_expect(fd, "file \"abc\\ndef\\n\", 2nd call", NULL);
+	close(fd);
+	tst_expect(-1, "get_next_line(-1)", NULL);
+	tst_leaks("BUFFER_SIZE <= 0");
+	printf("@@RESULT %d %d\n", g_ok, g_ko);
+	g_case = NULL;
+	return (0);
+}
+#else
 int	main(void)
 {
 	size_t	len;
@@ -708,6 +1005,12 @@ int	main(void)
 	FILE_STR("normal read after invalid fds", "ok\nok\n");
 	tst_read_error();
 	tst_malloc_fail();
+	tst_read_little();
+	tst_short_reads();
+	tst_high_fd();
+	s = tst_fill('\n', 1000, "", &len);
+	tst_file("file of 1000 empty lines", s, len);
+	free(s);
 #ifdef TST_BONUS
 	tst_bonus();
 #endif
@@ -715,6 +1018,7 @@ int	main(void)
 	g_case = NULL;
 	return (0);
 }
+#endif
 EOF
 }
 
@@ -752,20 +1056,22 @@ asan_report() {
 # ----------------------- Testing one BUFFER_SIZE build ---------------------- #
 # run_bs <label> <BUFFER_SIZE> <mand|bonus>
 run_bs() {
-	local label=$1 bs=$2 mode=$3 src="$TMP/t_gnl.c" bin="$TMP/t_$3_$2" out rc res ok ko t files=() def=()
+	local label=$1 bs=$2 mode=$3 src="$TMP/t_gnl.c" bin="$TMP/t_$3_$2" out rc res ok ko t warns files=() def=()
 	if [ "$mode" = bonus ]; then
 		files=("${BONUS_C[@]/#/$DIR/}"); def=(-DTST_BONUS)
 	else
 		files=("${MAND_C[@]/#/$DIR/}")
 	fi
+	[ "$bs" -le 0 ] && def+=(-DTST_BS_BAD)
 	if ! cc $SAN -g -w -D BUFFER_SIZE="$bs" "${def[@]}" -I"$DIR" "$src" "${files[@]}" \
-		-Wl,--wrap=malloc -Wl,--wrap=read -o "$bin" 2> "$TMP/cerr"; then
+		-Wl,--wrap=malloc -Wl,--wrap=free -Wl,--wrap=read -o "$bin" 2> "$TMP/cerr"; then
 		line_ko "$label"
 		if grep -q "undefined reference to .get_next_line'" "$TMP/cerr"; then
 			msg "get_next_line is not defined (wrong function name?)"
 		else
 			msg "does not compile: $(first_error "$TMP/cerr")"
 		fi
+		[ "$bs" -le 0 ] && msg "with BUFFER_SIZE <= 0, get_next_line must compile and return NULL"
 		return
 	fi
 	t=10; [ "$bs" -ge 1000000 ] && t=30
@@ -774,8 +1080,14 @@ run_bs() {
 	rc=$?
 	res=$(grep -m1 "^@@RESULT" <<< "$out")
 	ok=$(awk '{print $2}' <<< "$res"); ko=$(awk '{print $3}' <<< "$res")
+	warns=$(grep "^@@WARN " <<< "$out" | sed 's/^@@WARN //')
 	if [ -n "$res" ] && [ "$ko" = 0 ] && ! grep -q "Sanitizer" "$TMP/rerr" && ! grep -q "^@@LEAK" <<< "$out"; then
-		line_ok "$label" "($ok tests)"
+		if [ -n "$warns" ]; then
+			line_warn "$label" "check by hand ($ok tests passed)"
+			while IFS= read -r m; do note "$m"; done <<< "$warns"
+		else
+			line_ok "$label" "($ok tests)"
+		fi
 		return
 	fi
 	line_ko "$label"
@@ -790,6 +1102,7 @@ run_bs() {
 	grep -m1 "^@@LEAK" <<< "$out" | sed 's/^@@LEAK /memory leak detected after the test: /' \
 		| while IFS= read -r m; do msg "$m"; done
 	asan_report "$TMP/rerr"
+	[ -n "$warns" ] && while IFS= read -r m; do note "!! $m"; done <<< "$warns"
 }
 
 # External functions called by object files
@@ -911,6 +1224,11 @@ else
 	for bs in "${SIZES[@]}"; do
 		run_bs "BUFFER_SIZE=$bs" "$bs" mand
 	done
+	if [ $# -eq 0 ]; then
+		for bs in 0 -1; do
+			run_bs "BUFFER_SIZE=$bs (NULL expected)" "$bs" mand
+		done
+	fi
 fi
 
 # ---------------------------------- Bonus ----------------------------------- #
@@ -938,10 +1256,15 @@ else
 		for bs in "${SIZES[@]}"; do
 			run_bs "BUFFER_SIZE=$bs" "$bs" bonus
 		done
+		if [ $# -eq 0 ]; then
+			for bs in 0 -1; do
+				run_bs "BUFFER_SIZE=$bs (NULL expected)" "$bs" bonus
+			done
+		fi
 	fi
 fi
 
-printf "\n${B}Result:${N} ${G}%d OK${N}, ${R}%d KO${N}, ${D}%d skipped${N}\n" \
-	"$N_OK" "$N_KO" "$N_SKIP"
+printf "\n${B}Result:${N} ${G}%d OK${N}, ${R}%d KO${N}, ${Y}%d warning(s)${N}, ${D}%d skipped${N}\n" \
+	"$N_OK" "$N_KO" "$N_WARN" "$N_SKIP"
 disclaimer
 [ "$N_KO" -eq 0 ]

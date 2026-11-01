@@ -345,7 +345,37 @@ static long	*random_values(int n, long range)
 	return (v);
 }
 
-/* rand <seed> <n> <random|sorted|reverse|nearly|medium> */
+/* values over the whole int range, INT_MIN, INT_MAX, 0 and -1 included */
+static long	*extreme_values(int n)
+{
+	const long	sp[4] = {-2147483648L, 2147483647L, 0, -1};
+	long		*v = malloc((n + 1) * sizeof(long));
+	long		x;
+	int			dup;
+
+	for (int i = 0; i < n; i++)
+	{
+		do
+		{
+			x = i < 4 ? sp[i] : (long)(rnd() % 4294967296ULL) - 2147483648L;
+			dup = 0;
+			for (int j = 0; j < i && !dup; j++)
+				dup = (v[j] == x);
+		} while (dup);
+		v[i] = x;
+	}
+	for (int i = n - 1; i > 0; i--)
+	{
+		int		j = rnd() % (i + 1);
+
+		x = v[i];
+		v[i] = v[j];
+		v[j] = x;
+	}
+	return (v);
+}
+
+/* rand <seed> <n> <random|extreme|sorted|reverse|nearly|medium|rotated|swapends|pairs> */
 static int	cmd_rand(unsigned long long seed, int n, const char *mode)
 {
 	long	*v;
@@ -356,9 +386,25 @@ static int	cmd_rand(unsigned long long seed, int n, const char *mode)
 	g_s ^= seed * 0x9E3779B97F4A7C15ULL;
 	if (!g_s)
 		g_s = 1;
-	v = random_values(n, 1000000);
-	if (strcmp(mode, "random"))
+	v = !strcmp(mode, "extreme") ? extreme_values(n) : random_values(n, 1000000);
+	if (strcmp(mode, "random") && strcmp(mode, "extreme"))
 		qsort(v, n, sizeof(long), cmp);
+	if (!strcmp(mode, "rotated") && n > 1)
+		for (int k = 1 + rnd() % (n - 1); k > 0; k--)
+			rot(v, n);
+	if (!strcmp(mode, "swapends") && n > 1)
+	{
+		t = v[0];
+		v[0] = v[n - 1];
+		v[n - 1] = t;
+	}
+	if (!strcmp(mode, "pairs"))
+		for (int i = 0; i + 1 < n; i += 2)
+		{
+			t = v[i];
+			v[i] = v[i + 1];
+			v[i + 1] = t;
+		}
 	if (!strcmp(mode, "reverse"))
 		for (int i = 0; i < n / 2; i++)
 		{
@@ -497,7 +543,7 @@ if ! cc -O2 -w "$TMP/pscheck.c" -o "$TMP/pscheck" 2> "$TMP/err"; then
 	exit 1
 fi
 PSCHECK="$TMP/pscheck"
-for n in 3 4 5; do "$PSCHECK" perms $n > "$TMP/perms$n"; done
+for n in 3 4 5 6; do "$PSCHECK" perms $n > "$TMP/perms$n"; done
 
 # ----------------------------- Execution tools ------------------------------ #
 # Short display of an argument list
@@ -517,13 +563,13 @@ show_file() {
 	else printf '"%s"' "$(awk 'BEGIN { ORS = "\\n" } { print }' "$1" | head -c 70)"; fi
 }
 
-# Saves a big failing input, so you can replay it
+# Saves a big failing input, so you can replay it → SAVED (file name)
+# (not called in $(...): the counter must survive)
 N_SAVED=0
 save_args() {
 	N_SAVED=$((N_SAVED + 1))
-	local f="/tmp/push_swap_ko_$N_SAVED.txt"
-	printf '%s ' "$@" > "$f"
-	printf '%s' "$f"
+	SAVED="/tmp/push_swap_ko_$N_SAVED.txt"
+	printf '%s ' "$@" > "$SAVED"
 }
 
 user_frame() {
@@ -577,7 +623,10 @@ t_end() {
 		if [ $i -gt 6 ]; then msg "… (${#T_FAILS[@]} errors in total)"; break; fi
 		msg "$m"
 	done
-	[ -n "$T_MEM" ] && msg "$T_MEM"
+	# (not twice when a failure already shows this memory error)
+	if [ -n "$T_MEM" ] && ! printf '%s\n' "${T_FAILS[@]}" | grep -qF -- "${T_MEM% (with: *}"; then
+		msg "$T_MEM"
+	fi
 	[ -n "$T_INFO" ] && note "$T_INFO"
 }
 
@@ -617,7 +666,8 @@ sort_check() {
 		*) res="invalid output, line ${res#ERR }" ;;
 	esac
 	if [ $# -gt 12 ]; then
-		t_fail "$cmd: $res (replay with: ARG=\$(cat $(save_args "$@")); ./push_swap ${f:+$f }\$ARG)"
+		save_args "$@"
+		t_fail "$cmd: $res (replay with: ARG=\$(cat $SAVED); ./push_swap ${f:+$f }\$ARG)"
 	else
 		t_fail "$cmd: $res"
 	fi
@@ -802,25 +852,39 @@ if [ -n "$PS" ] && wanted errors; then
 
 	t_begin
 	for c in '1 a 3' '1 2a 3' 'abc' '-' '+' '1 - 3' '--5' '1 +-2' '1.5 2' '0x1 2' '"" 1' '1 ""' \
-		'"1 2" a' '--adaptive 0 one 2 3' '--simple 4 2 x'; do
+		'"1 2" a' '--adaptive 0 one 2 3' '--simple 4 2 x' '1-2 3' '5+ 1' '++5 1' '-+5 1' '1e3 2' \
+		'2147483647a 1' '1 2 3 4 5 6 7 8 9 x' 'x 1 2 3 4 5 6 7 8 9'; do
 		eval "set -- $c"
 		expect_error "$@"
 	done
+	# the error is only at the very end of a big input
+	set -- $("$PSCHECK" rand 41 500 random)
+	expect_error "$@" 12abc
 	t_end "not integers"
 
 	t_begin
 	for c in '2147483648' '-2147483649' '1 2147483648 3' '4294967296' '-4294967296 1' \
-		'99999999999999999999' '1 -99999999999999999999' '9223372036854775808'; do
+		'99999999999999999999' '1 -99999999999999999999' '9223372036854775808' '+2147483648 1' \
+		'4294967297 2' '18446744073709551617 2' '-9223372036854775809 1' '12345678901 1' \
+		'00000000002147483648 1' '-2147483648 2147483647 2147483648'; do
 		eval "set -- $c"
 		expect_error "$@"
 	done
+	set -- $("$PSCHECK" rand 42 500 random)
+	expect_error "$@" 2147483648
 	t_end "int overflow"
 
 	t_begin
-	for c in '1 2 1' '3 2 3' '--simple 3 2 3' '5 5' '-1 0 -1' '1 +1' '42 042' '2147483647 1 2147483647'; do
+	for c in '1 2 1' '3 2 3' '--simple 3 2 3' '5 5' '-1 0 -1' '1 +1' '42 042' '2147483647 1 2147483647' \
+		'0 -0' '-0 +0' '0 00' '-01 -1' '-2147483648 5 -2147483648' '1 2 3 4 5 6 7 8 9 1'; do
 		eval "set -- $c"
 		expect_error "$@"
 	done
+	# the duplicate is the last number of a big input
+	set -- $("$PSCHECK" rand 43 500 random)
+	expect_error "$@" "$1"
+	set -- $("$PSCHECK" rand 44 500 extreme)
+	expect_error "$@" -2147483648
 	t_end "duplicates"
 
 	t_begin
@@ -828,6 +892,11 @@ if [ -n "$PS" ] && wanted errors; then
 	sort_check "" -2147483648 2147483647
 	sort_check "" -1 -5 -3
 	sort_check "" 0 -1
+	sort_check "" 2147483647 -2147483648 2147483646 -2147483647 0
+	sort_check "" -2147483648 2147483647 -1 1 0 2147483646
+	for s in 1 2 3; do
+		sort_check "" $("$PSCHECK" rand $((50 + s)) $((s * 7)) extreme)
+	done
 	t_end "int limits"
 fi
 
@@ -850,10 +919,18 @@ if [ -n "$PS" ] && wanted sort; then
 		done
 		sort_check "$f" -2147483648 0 2147483647
 		sort_check "$f" -1 -2 -3 -4 -5
+		[ $i -eq 0 ] && while read -r l; do sort_check "$f" $l; done < "$TMP/perms6"
 		for spec in "1 6 random" "2 10 random" "3 20 random" "4 50 random" "5 100 random" "6 500 random" \
 			"7 100 sorted" "8 500 sorted" "9 100 reverse" "10 500 reverse" "11 100 nearly" \
-			"12 500 nearly" "13 100 medium" "14 500 medium"; do
+			"12 500 nearly" "13 100 medium" "14 500 medium" \
+			"61 7 random" "62 8 random" "63 11 random" "64 16 random" "65 33 random" "66 64 random" \
+			"67 99 random" "68 101 random" "69 128 random" "70 255 random" "71 256 random" \
+			"72 499 random" "73 501 random" "74 1000 random" "75 5 extreme" "76 100 extreme" \
+			"77 500 extreme" "78 6 rotated" "79 100 rotated" "80 500 rotated" "81 100 swapends" \
+			"82 500 swapends" "83 100 pairs" "84 500 pairs" "85 7 reverse" "86 6 sorted"; do
 			set -- $spec
+			# (an O(n²) strategy may be too slow on 1000 numbers under ASan)
+			[ "$f" = --simple ] && [ "$2" -gt 501 ] && continue
 			if sort_check "$f" $("$PSCHECK" rand "$1" "$2" "$3"); then
 				[ "$3" = random ] && [ "$2" = 100 ] && { o100=$NOPS; cp "$TMP/out" "$TMP/o_${i}_100"; }
 				[ "$3" = random ] && [ "$2" = 500 ] && o500=$NOPS
@@ -862,7 +939,7 @@ if [ -n "$PS" ] && wanted sort; then
 				fi
 			fi
 		done
-		for l in "1 2 3" "1 2 3 4 5"; do
+		for l in "1 2" "1 2 3" "1 2 3 4 5" "-2147483648 2147483647" "-3 -2 -1 0 1 2"; do
 			if [ $i -eq 0 ] || [ $i -eq 4 ]; then
 				sort_check "$f" $l && [ "$NOPS" != 0 ] \
 					&& t_fail "./push_swap ${f:+$f }$l: already sorted, must not print anything (prints $NOPS operations)"
@@ -1059,7 +1136,30 @@ if wanted bonus; then
 		ops 'pb\npb\npb\nrr\npa\npa\npa\n'; ck_expect OK '"pb pb pb rr pa pa pa"' "$TMP/in" 2 3 1 6 4 5
 		ops 'pb\npb\npb\nrrr\npa\npa\npa\n'; ck_expect OK '"pb pb pb rrr pa pa pa"' "$TMP/in" 3 1 2 5 6 4
 		ops 'pb\npb\npb\nrr\npa\npa\npa\n'; ck_expect KO '"pb pb pb rr pa pa pa"' "$TMP/in" 3 1 2 5 6 4
+		ops 'sa\npa\n'; ck_expect KO '"sa pa"' "$TMP/in" 1 2 3
+		ck_expect OK "no operation" /dev/null -2147483648 0 2147483647
+		ck_expect KO "no operation" /dev/null 2147483647 -2147483648
 		t_end "OK / KO"
+
+		# operations on an empty or one-element stack do nothing (no crash)
+		t_begin
+		ops 'pa\nsb\nrb\nrrb\n'; ck_expect OK '"pa sb rb rrb" (b is empty)' "$TMP/in" 1 2 3
+		ops 'sa\nra\nrra\nss\nrr\nrrr\n'; ck_expect OK '"sa ra rra ss rr rrr" (a has 1 element, b is empty)' "$TMP/in" 42
+		ops 'pb\nsa\nra\nrra\npb\npa\n'; ck_expect OK '"pb sa ra rra pb pa" (a becomes empty)' "$TMP/in" 7
+		ops 'pb\nsb\nrb\nrrb\npa\n'; ck_expect OK '"pb sb rb rrb pa" (b has 1 element)' "$TMP/in" 1 2
+		ops 'pb\npb\npb\npa\npa\npa\npa\npa\n'; ck_expect OK '"pb pb pb pa pa pa pa pa"' "$TMP/in" 1 2 3
+		ops 'pb\npb\n'; ck_expect KO '"pb pb" (a becomes empty, b is not)' "$TMP/in" 2 1
+		t_end "empty stacks"
+
+		# many operations: 200000 lines on stdin
+		t_begin
+		{ echo sa; yes ra | head -n 199998; } > "$TMP/in"
+		ck_expect OK '"sa" then "ra" 199998 times' "$TMP/in" 2 1 3
+		{ yes pb | head -n 50000; yes pa | head -n 50000; } > "$TMP/in"
+		ck_expect OK '"pb" 50000 times then "pa" 50000 times' "$TMP/in" $("$PSCHECK" rand 45 500 sorted)
+		{ yes rra | head -n 99999; echo sa; } > "$TMP/in"
+		ck_expect KO '"rra" 99999 times then "sa"' "$TMP/in" 1 2 3
+		t_end "many operations"
 
 		t_begin
 		run /dev/null "$CK"
@@ -1075,9 +1175,13 @@ if wanted bonus; then
 		ck_expect Error "no operation" /dev/null 1 2 1
 		ck_expect Error "no operation" /dev/null 1 2147483648
 		ck_expect Error "no operation" /dev/null -2147483649 1
-		for o in 'xx' 'sa ' ' sa' 'SA' 'sa\tsb' 'pa pb' 'rrrr' ''; do
+		for o in 'xx' 'sa ' ' sa' 'SA' 'sa\tsb' 'pa pb' 'rrrr' '' 'ra\r' 's' 'r' 'p' 'Ra' 'rr ' 'sasa' 'rrrb'; do
 			ops "sa\n$o\n"; ck_expect Error "\"sa\" then \"$o\"" "$TMP/in" 2 1 3
 		done
+		ck_expect Error "no operation" /dev/null 0 -0
+		ck_expect Error "no operation" /dev/null 1 2 3 4 5 6 7 8 9 x
+		{ yes ra | head -n 1000; echo rx; } > "$TMP/in"
+		ck_expect Error '"ra" 1000 times, then "rx"' "$TMP/in" 3 2 1
 		t_end "errors"
 
 		t_begin
