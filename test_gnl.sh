@@ -137,6 +137,9 @@ static unsigned		g_read_seed = 1;
 static long			g_read_bytes = 0;
 static int			g_leak_seen = 0;
 static int			g_warn = 0;
+static int			g_greedy = 0;
+static volatile int	g_in_read = 0;
+static int			g_read_eagain = 0;
 
 /* rigged malloc: the g_malloc_fail-th call returns NULL; g_live counts the
    blocks not freed yet */
@@ -181,7 +184,11 @@ ssize_t	__wrap_read(int fd, void *buf, size_t n)
 		g_read_seed = g_read_seed * 1103515245u + 12345u;
 		n = 1 + (g_read_seed >> 8) % (g_read_seed & 1 ? (n < 5 ? n : 5) : n);
 	}
+	g_in_read = 1;
 	r = __real_read(fd, buf, n);
+	g_in_read = 0;
+	if (r < 0 && errno == EAGAIN)
+		g_read_eagain++;
 	if (r > 0)
 		g_read_bytes += r;
 	return (r);
@@ -330,7 +337,8 @@ static int	tst_lines(int fd, const char *name, const char *content, size_t len)
 	}
 	for (int k = 1; k <= 2; k++)
 	{
-		snprintf(d, sizeof d, "%s: %s call after the last line", name, k == 1 ? "1st" : "2nd");
+		snprintf(d, sizeof d, "%s: %s call%s", name, k == 1 ? "1st" : "2nd",
+			len ? " after the last line" : "");
 		CASE(d);
 		got = get_next_line(fd);
 		if (got)
@@ -430,6 +438,8 @@ static void	tst_pipe_open(void)
 		perror("pipe");
 		exit(1);
 	}
+	fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
+	g_read_eagain = 0;
 	alarm(5);
 	if (write(p[1], "abc\n", 4) != 4)
 		perror("write");
@@ -444,6 +454,9 @@ static void	tst_pipe_open(void)
 	tst_expect(p[0], "pipe closed after \"jkl\"", "jkl");
 	tst_expect(p[0], "pipe closed: end", NULL);
 	alarm(0);
+	if (g_read_eagain)
+		tst_fail("pipe still open: get_next_line called read() again although the line was already "
+			"complete (or read the whole input at once): on a terminal or an open pipe it would wait forever");
 	close(p[0]);
 	tst_leaks("pipe still open");
 }
@@ -455,6 +468,7 @@ static void	tst_bad_fd(void)
 	tst_expect(-1, "get_next_line(-1)", NULL);
 	tst_expect(4242, "get_next_line(4242) (fd not open)", NULL);
 	tst_expect(100000, "get_next_line(100000) (fd not open)", NULL);
+	tst_expect(1024, "get_next_line(1024) (fd not open)", NULL);
 	fd = tst_open("tst_file.txt", "abc\n", 4);
 	close(fd);
 	tst_expect(fd, "get_next_line(fd) on a closed fd", NULL);
@@ -466,7 +480,7 @@ static void	tst_bad_fd(void)
 
 static void	tst_read_error(void)
 {
-	const char	*c = "aaaaaaaaaa\nbbbbbbbbbb\ncccccccccc\ndddddddddd\n";
+	const char	*c = "aaaaaaaaaa\nbbbbbbbbbb\ncccccccccc\ndddddddddd";
 	const char	*l[] = {"aaaaaaaaaa\n", "bbbbbbbbbb\n", "cccccccccc\n", "dddddddddd\n"};
 	int			fd = tst_open("tst_file.txt", c, strlen(c));
 	int			k = 1;
@@ -506,8 +520,8 @@ static char	*tst_around(size_t *len);
 /* every malloc of the call fails in turn (1st, 2nd, ... allocation) */
 static void	tst_malloc_fail(void)
 {
-	const char	*c = "line 01\nline 02\nlast line";
-	const char	*l[] = {"line 01\n", "line 02\n", "last line", NULL};
+	const char	*c = "line 1\nline 02\nlast line";
+	const char	*l[] = {"line 1\n", "line 02\n", "last line", NULL};
 	const char	*what[] = {"the 1st line", "the 2nd line", "the last line (no \\n)",
 		"the call after the last line"};
 	char		d[200];
@@ -549,9 +563,11 @@ static void	tst_malloc_fail(void)
 			CASE(d);
 			tst_drain(fd);
 			close(fd);
+			snprintf(d, sizeof d, "malloc #%d (of %d) failed while reading %s "
+				"(free the stash before returning NULL)", n, cnt, what[step]);
+			tst_leaks(d);
 		}
 	}
-	tst_leaks("malloc failures");
 }
 
 /* subject: "try to read as little as possible", "don't read the whole file
@@ -577,6 +593,7 @@ static void	tst_read_little(void)
 			tst_fail("after %d line(s) of 20 chars, read() has already returned %ld bytes "
 				"(at most %d expected): the subject says to stop reading as soon as a \\n is found",
 				k, g_read_bytes, 21 * k + BUFFER_SIZE);
+			g_greedy = 1;
 			break ;
 		}
 		if (k == 3)
@@ -849,9 +866,9 @@ static void	tst_many_fds(void)
 /* a read() error on one fd must not touch the other fds */
 static void	tst_bonus_read_error(void)
 {
-	const char	*a = "a1\na2\na3\na4\na5\n";
+	const char	*a = "a1\na2\na3\na4\na5";
 	const char	*la[] = {"a1\n", "a2\n", "a3\n", "a4\n", "a5\n"};
-	const char	*b = "b1\nb2\nb3\nb4\nb5";
+	const char	*b = "b1-xyz\nb2\nb3\nb4\nb5";
 	int			fa = tst_open("tst_multi0.txt", a, strlen(a));
 	int			fb = tst_open("tst_multi1.txt", b, strlen(b));
 	int			k = 1;
@@ -859,7 +876,7 @@ static void	tst_bonus_read_error(void)
 	char		*got;
 
 	tst_expect(fa, "read error on fd A only: fd A, line 1", "a1\n");
-	tst_expect(fb, "read error on fd A only: fd B, line 1", "b1\n");
+	tst_expect(fb, "read error on fd A only: fd B, line 1", "b1-xyz\n");
 	g_read_fail = 1;
 	g_read_fail_fd = fa;
 	CASE("read() returns -1 on fd A only: get_next_line(A) must return NULL");
@@ -881,7 +898,7 @@ static void	tst_bonus_read_error(void)
 	if (bad)
 		tst_drain(fa);
 	close(fa);
-	tst_lines(fb, "read error on fd A, then the rest of fd B", b + 3, strlen(b) - 3);
+	tst_lines(fb, "read error on fd A, then the rest of fd B", b + 7, strlen(b) - 7);
 	close(fb);
 	fa = tst_open("tst_multi0.txt", a, strlen(a));
 	tst_lines(fa, "after a read error on fd A, reading the file again from the start", a, strlen(a));
@@ -917,7 +934,7 @@ static void	tst_on_death(void)
 
 static void	tst_on_signal(int sig)
 {
-	printf("\n@@CRASH %s\n@@SIGNAL %d\n", g_case, sig);
+	printf("\n@@CRASH %s\n@@SIGNAL %d\n@@INREAD %d\n", g_case, sig, g_in_read);
 	_exit(128 + sig);
 }
 
@@ -978,6 +995,7 @@ int	main(void)
 	FILE_STR("3 lines without a final \\n", "line 01\nline 02\nline 03");
 	FILE_STR("empty lines in the middle", "abc\n\n\ndef\n\nghi");
 	FILE_STR("special characters", "\t \r\v\f\n\xc3\xa9t\xc3\xa9 \xe2\x82\xac \xff\x80\n~\x01\n");
+	tst_read_little();
 	s = tst_fill('x', 10000, "\n", &len);
 	tst_file("line of 10000 chars + \\n", s, len);
 	free(s);
@@ -994,9 +1012,14 @@ int	main(void)
 		free(s);
 	}
 	s = tst_gen(big ? 100 : 2000, 100, 42, &len);
-	tst_file("big file (random lines)", s, len);
-	tst_stdin("stdin (big file)", s, len);
-	tst_pipe("pipe (big file)", s, len);
+	if (g_greedy)
+		tst_fail("big file tests skipped: reading the whole input first is too slow");
+	else
+	{
+		tst_file("big file (random lines)", s, len);
+		tst_stdin("stdin (big file)", s, len);
+		tst_pipe("pipe (big file)", s, len);
+	}
 	free(s);
 	tst_stdin("empty stdin", "", 0);
 	tst_stdin("stdin (3 lines)", "one\ntwo\nthree\n", 14);
@@ -1005,7 +1028,6 @@ int	main(void)
 	FILE_STR("normal read after invalid fds", "ok\nok\n");
 	tst_read_error();
 	tst_malloc_fail();
-	tst_read_little();
 	tst_short_reads();
 	tst_high_fd();
 	s = tst_fill('\n', 1000, "", &len);
@@ -1093,9 +1115,16 @@ run_bs() {
 	line_ko "$label"
 	grep "^@@MSG " <<< "$out" | sed 's/^@@MSG //' | while IFS= read -r m; do msg "$m"; done
 	if [ $rc -eq 124 ]; then
-		msg "too slow or infinite loop ($t s timeout) during: $(grep "^@@CRASH" <<< "$out" | tail -1 | sed 's/^@@CRASH //')"
-	elif grep -q "^@@SIGNAL 14" <<< "$out"; then
+		if grep -q "^@@INREAD 1" <<< "$out"; then
+			msg "blocked in read() ($t s timeout) during: $(grep "^@@CRASH" <<< "$out" | tail -1 | sed 's/^@@CRASH //')"
+		else
+			msg "too slow or infinite loop ($t s timeout) during: $(grep "^@@CRASH" <<< "$out" | tail -1 | sed 's/^@@CRASH //')"
+		fi
+	elif grep -q "^@@SIGNAL 14" <<< "$out" && grep -q "^@@INREAD 1" <<< "$out" && [ "$bs" -gt 0 ]; then
 		msg "stuck on read() during: $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
+	elif grep -q "^@@SIGNAL 14" <<< "$out"; then
+		msg "infinite loop during: $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
+		[ "$bs" -le 0 ] && msg "with BUFFER_SIZE <= 0, read() never returns data: return NULL before reading"
 	elif [ -z "$res" ]; then
 		msg "crash during: $(grep -m1 "^@@CRASH" <<< "$out" | sed 's/^@@CRASH //')"
 	fi

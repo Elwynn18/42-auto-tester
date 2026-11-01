@@ -292,8 +292,25 @@ static void	tst_cmp(int r1, int n, int r2)
 			tst_fail("%s: correct output but returns %d, expected %d", g_case, r1, r2);
 	}
 	else
-		tst_fail("%s → %s (returns %d), expected %s (returns %d)",
-			g_case, tst_qn(g_got, n), r1, tst_qn(g_exp, r2), r2);
+	{
+		int	k = 0;
+		int	st;
+
+		while (k < n && k < r2 && g_got[k] == g_exp[k])
+			k++;
+		if (k < 60)
+		{
+			tst_fail("%s → %s (returns %d), expected %s (returns %d)",
+				g_case, tst_qn(g_got, n), r1, tst_qn(g_exp, r2), r2);
+			return ;
+		}
+		/* long output: show where it differs */
+		st = k - 20;
+		tst_fail("%s → %d chars (returns %d), expected %d chars (returns %d); "
+			"first difference at char %d: …%s instead of …%s",
+			g_case, n, r1, r2, r2, k, tst_qn(g_got + st, n - st < 50 ? n - st : 50),
+			tst_qn(g_exp + st, r2 - st < 50 ? r2 - st : 50));
+	}
 }
 
 #define CASE(d) (g_case = (d))
@@ -307,28 +324,38 @@ static void	tst_cmp(int r1, int n, int r2)
    and (like printf) the return value should be -1 */
 static char	g_mdesc[400];
 static int	g_mret_warned = 0;
-#define TM(desc, ...) do { int tst_cnt; int tst_r; CASE(desc); \
+#define TM(desc, ...) do { int tst_cnt; int tst_r; int tst_pre; CASE(desc); \
 	tst_begin(); g_mcount = 0; ft_printf(__VA_ARGS__); tst_cnt = g_mcount; tst_end(); \
+	tst_pre = tst_has_leak(); \
 	for (int tst_k = 1; tst_k <= tst_cnt && tst_k <= 40; tst_k++) { \
 		snprintf(g_mdesc, sizeof g_mdesc, "malloc #%d fails in %s", tst_k, desc); \
 		CASE(g_mdesc); tst_begin(); g_mfail = tst_k; tst_r = ft_printf(__VA_ARGS__); \
 		g_mfail = 0; tst_end(); g_ok++; \
 		if (tst_r != -1 && !g_mret_warned++) \
 			tst_warn("%s → returns %d (printf returns -1 when malloc fails)", g_mdesc, tst_r); } \
+	if (tst_cnt && !tst_pre && tst_has_leak()) \
+		tst_fail("memory leak when a malloc fails in %s (details below)", desc); \
 	} while (0)
 #define TMM(...) TM("ft_printf(" #__VA_ARGS__ ")", __VA_ARGS__)
 
-/* checks the leaks made when malloc fails (the others are reported at exit) */
-static void	tst_mleaks(void)
+/* 1 once a leak exists (checked until the first one; the leaks are all
+   reported again at exit) */
+static int	tst_has_leak(void)
 {
+	static int	leak = 0;
+
 #ifdef __SANITIZE_ADDRESS__
-	if (__lsan_do_recoverable_leak_check())
-		tst_fail("memory leak when a malloc fails inside ft_printf (details below)");
+	if (!leak && __lsan_do_recoverable_leak_check())
+		leak = 1;
 #endif
+	return (leak);
 }
 
 /* runs fn() in a child process, stdout on /dev/null (stderr too if quiet):
    returns 0 (finished, *ret = what fn returned), 1 (crash), 2 (infinite loop) */
+static int	g_loops = 0;
+static int	g_loop_skipped = 0;
+
 static int	tst_child(int (*fn)(void), int quiet, int *ret)
 {
 	int		p[2];
@@ -336,6 +363,12 @@ static int	tst_child(int (*fn)(void), int quiet, int *ret)
 	int		v = 0;
 	pid_t	pid;
 
+	/* after 2 infinite loops, the next cases are skipped (1 s each) */
+	if (g_loops >= 2)
+	{
+		g_loop_skipped++;
+		return (3);
+	}
 	if (pipe(p) != 0 || (pid = fork()) < 0)
 	{
 		perror("fork");
@@ -349,7 +382,7 @@ static int	tst_child(int (*fn)(void), int quiet, int *ret)
 		dup2(dn, 1);
 		if (quiet)
 			dup2(dn, 2);
-		alarm(3);
+		alarm(1);
 		v = fn();
 		if (write(p[1], &v, sizeof v) < 0)
 			_exit(1);
@@ -361,7 +394,10 @@ static int	tst_child(int (*fn)(void), int quiet, int *ret)
 		v = 0;
 	close(p[0]);
 	if (WIFSIGNALED(st) && WTERMSIG(st) == SIGALRM)
+	{
+		g_loops++;
 		return (2);
+	}
 	if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
 		return (1);
 	*ret = v;
@@ -570,6 +606,26 @@ mix) cat <<'EOF'
 static void	tst_g_mix(void)
 {
 	int	x = 0;
+	int	r1;
+	int	r2;
+	int	n;
+
+	/* nothing may stay in a buffer once ft_printf has returned */
+	CASE("ft_printf(\"abc\"), write(1, \"|\", 1), ft_printf(\"%d\", 42), write(1, \"|\", 1)");
+	tst_begin();
+	r1 = ft_printf("abc");
+	if (write(1, "|", 1) != 1)
+		perror("write");
+	r2 = ft_printf("%d", 42);
+	if (write(1, "|", 1) != 1)
+		perror("write");
+	n = tst_end();
+	if (n != 7 || memcmp(g_got, "abc|42|", 7) || r1 != 3 || r2 != 2)
+		tst_fail("%s → %s (returns %d and %d), expected \"abc|42|\" (returns 3 and 2): "
+			"ft_printf must write everything before returning (no buffer kept between calls)",
+			g_case, tst_qn(g_got, n), r1, r2);
+	else
+		g_ok++;
 
 	T("");
 	T("hello world");
@@ -593,9 +649,6 @@ static void	tst_g_mix(void)
 		char	*lf = malloc(20010);
 		char	bytes[256];
 		int		j = 0;
-		int		r1;
-		int		r2;
-		int		n;
 
 		/* 20000-char format, with conversions in the middle and at the end */
 		memset(lf, 'f', 20000);
@@ -609,22 +662,6 @@ static void	tst_g_mix(void)
 				bytes[j++] = (char)c;
 		bytes[j] = 0;
 		TD("ft_printf(<every byte from 1 to 255 except %>)", bytes);
-		/* nothing may stay in a buffer once ft_printf has returned */
-		CASE("ft_printf(\"abc\"), write(1, \"|\", 1), ft_printf(\"%d\", 42), write(1, \"|\", 1)");
-		tst_begin();
-		r1 = ft_printf("abc");
-		if (write(1, "|", 1) != 1)
-			perror("write");
-		r2 = ft_printf("%d", 42);
-		if (write(1, "|", 1) != 1)
-			perror("write");
-		n = tst_end();
-		if (n != 7 || memcmp(g_got, "abc|42|", 7) || r1 != 3 || r2 != 2)
-			tst_fail("%s → %s (returns %d and %d), expected \"abc|42|\" (returns 3 and 2): "
-				"ft_printf must write everything before returning (no buffer kept between calls)",
-				g_case, tst_qn(g_got, n), r1, r2);
-		else
-			g_ok++;
 	}
 }
 EOF
@@ -677,10 +714,11 @@ static void	tst_ub(const char *f)
 	CASE(d);
 	res = tst_child(tst_fn_int, 0, &r);
 	if (res == 1)
-		tst_fail("%s: crash (undefined behaviour, but the real printf does not crash)", d);
+		tst_fail("%s: crash or memory error (undefined behaviour, but the real printf "
+			"neither crashes nor reads past the end of the format)", d);
 	else if (res == 2)
 		tst_fail("%s: infinite loop (undefined behaviour, but the real printf returns)", d);
-	else
+	else if (res == 0)
 		g_ok++;
 	free(h);
 }
@@ -706,7 +744,7 @@ static void	tst_write_fail(int (*mode)(void), const char *how)
 			tst_fail("%s: crash", d);
 		else if (res == 2)
 			tst_fail("%s: infinite loop", d);
-		else
+		else if (res == 0)
 		{
 			g_ok++;
 			if (r != -1 && strlen(bad) < 200)
@@ -733,6 +771,8 @@ static void	tst_g_robust(void)
 	res = tst_child(tst_fn_null, 1, &r);
 	if (res == 2)
 		tst_fail("ft_printf(NULL): infinite loop");
+	else if (res == 3)
+		;
 	else if (res == 1)
 		tst_warn("ft_printf(NULL) crashes (undefined behaviour; glibc's printf returns -1)");
 	else
@@ -740,6 +780,8 @@ static void	tst_g_robust(void)
 	tst_write_fail(tst_fn_closed, "stdout closed");
 	if (access("/dev/full", W_OK) == 0)
 		tst_write_fail(tst_fn_full, "stdout = /dev/full");
+	if (g_loop_skipped)
+		tst_fail("%d other tests skipped after 2 infinite loops", g_loop_skipped);
 	/* each malloc fails in turn: no crash, no leak */
 	TMM("hello");
 	TMM("%c", 'a');
@@ -755,7 +797,6 @@ static void	tst_g_robust(void)
 	TMM("%%");
 	TMM("%c%s%p%d%i%u%x%X%%", 'a', "bc", (void *)0xff, -1, 2, 3u, 255u, 255u);
 	TMM("%s %s %s %d %d %d", "a", "b", "c", 1, 2, 3);
-	tst_mleaks();
 }
 EOF
 	;;
@@ -1023,7 +1064,6 @@ static void	tst_g_combo(void)
 	TMM("[%-300s]", "abc");
 	TMM("[%.300x]", 42u);
 	TMM("[%#020X|%-20u|%020i]", 42u, 42u, -42);
-	tst_mleaks();
 }
 EOF
 	;;
@@ -1277,8 +1317,9 @@ user_frame() {
 # Line of the test that made the faulty call
 test_frame_line() {
 	local src=$1 n
-	n=$(grep -E "/$(basename "$src"):[0-9]+" | head -1 | sed -E 's/.*\.c:([0-9]+).*/\1/')
-	[ -n "$n" ] && sed -n "${n}p" "$src" | sed -E 's/^[[:space:]]+//; s/^T\(/ft_printf(/; s/\);$/)/' | cut -c1-110
+	n=$(grep -E "/$(basename "$src"):[0-9]+" | grep -v ' in __wrap_malloc ' | head -1 \
+		| sed -E 's/.*\.c:([0-9]+).*/\1/')
+	[ -n "$n" ] && sed -n "${n}p" "$src" | sed -E 's/^[[:space:]]+//; s/^TM*\(/ft_printf(/; s/\);$/)/' | cut -c1-110
 }
 
 asan_report() {
@@ -1293,7 +1334,7 @@ asan_report() {
 		fi
 	fi
 	if grep -q "ERROR: LeakSanitizer" "$err"; then
-		msg "memory leak: $(grep -m1 -oE '[0-9]+ byte\(s\) leaked in [0-9]+ allocation\(s\)' "$err")"
+		msg "memory leak: $(grep -oE '[0-9]+ byte\(s\) leaked in [0-9]+ allocation\(s\)' "$err" | tail -1)"
 		awk '/leak of/{n++} {print > (FILENAME "." n)}' "$err"
 		for blk in "$err".[1-9]*; do
 			[ -f "$blk" ] || continue
