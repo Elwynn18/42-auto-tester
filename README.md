@@ -70,13 +70,14 @@ bash ../test_gnl.sh              # test everything
 bash ../test_gnl.sh 1 42         # only these BUFFER_SIZE values
 ```
 
-- **Submission:** required files only, README, prototype, no libft, compiles with `-Wall -Wextra -Werror` both with and without `-D BUFFER_SIZE`, only `read`, `malloc` and `free` used, no global variable, norminette.
+- **Submission:** required files only, no Makefile (the subject says "Makefile: No"), README, prototype, no libft, compiles with `-Wall -Wextra -Werror` both with and without `-D BUFFER_SIZE`, only `read`, `malloc` and `free` used, no global variable, norminette.
 - **Mandatory part:** run with `BUFFER_SIZE` = 1, 2, 3, 5, 10, 42, 100, 1000, 9999 and 10000000. It tests:
   - files (empty, no final newline, very long lines, lines around `BUFFER_SIZE`, 1000 empty lines);
   - stdin, pipes, and a pipe that is still open;
   - invalid fds, a file read through fd 1023, and `read()` errors;
   - `malloc()` failures: each allocation of a call fails in turn (1st line, 2nd line, last line, call after the last line);
   - short reads: `read()` returns fewer bytes than asked, which is allowed (pipes, terminals);
+  - every `read()` call must ask for exactly `BUFFER_SIZE` bytes (KO otherwise, even for `read(fd, NULL, 0)`);
   - reading only what is needed: once a `\n` is found, `get_next_line` must stop calling `read()` (the subject forbids reading the whole file first);
   - memory leaks, and a warning when blocks are still allocated after `get_next_line` returned NULL (valgrind's "still reachable").
 - **`BUFFER_SIZE=0` and `BUFFER_SIZE=-1`:** must compile and return NULL, without crashing or looping.

@@ -12,6 +12,8 @@
 #  - Files, stdin, pipes, invalid fds, read() and malloc() errors, short      #
 #    reads, BUFFER_SIZE <= 0 and fd 1023 are tested; the bonus is tested with  #
 #    up to 200 fds read in turn and a read() error on a single fd.             #
+#  - Every read() call must ask for exactly BUFFER_SIZE bytes.                 #
+#  - A Makefile in the folder is a KO (the subject says "Makefile: No").       #
 #  - AddressSanitizer detects crashes, memory overflows and leaks.             #
 #  - Do NOT put this file in your repository.                                  #
 # **************************************************************************** #
@@ -140,6 +142,7 @@ static int			g_warn = 0;
 static int			g_greedy = 0;
 static volatile int	g_in_read = 0;
 static int			g_read_eagain = 0;
+static int			g_read_badsize = 0;
 
 /* rigged malloc: the g_malloc_fail-th call returns NULL; g_live counts the
    blocks not freed yet */
@@ -167,13 +170,23 @@ void	__wrap_free(void *p)
 	__real_free(p);
 }
 
+static void	tst_fail(const char *fmt, ...);
+
 /* rigged read: returns -1 while g_read_fail is 1 (on every fd, or only on
-   g_read_fail_fd); with g_read_short, returns fewer bytes than asked */
+   g_read_fail_fd); with g_read_short, returns fewer bytes than asked.
+   Every call must ask for exactly BUFFER_SIZE bytes (reported once). */
 ssize_t	__real_read(int fd, void *buf, size_t n);
 ssize_t	__wrap_read(int fd, void *buf, size_t n)
 {
 	ssize_t	r;
 
+	if (n != (size_t)(BUFFER_SIZE) && !g_read_badsize)
+	{
+		g_read_badsize = 1;
+		tst_fail("read() called with a size of %zu instead of BUFFER_SIZE (%ld) during: %s"
+			" -> always read exactly BUFFER_SIZE bytes", n, (long)(BUFFER_SIZE),
+			g_case ? g_case : "end of the test");
+	}
 	if (g_read_fail && (g_read_fail_fd < 0 || fd == g_read_fail_fd))
 	{
 		errno = EIO;
@@ -1230,6 +1243,11 @@ if [ $# -eq 0 ]; then
 	fi
 	if grep -lE '#[[:space:]]*include[[:space:]]+"[^"]*libft' "$DIR"/*.c "$DIR"/*.h > /dev/null 2>&1; then
 		line_ko "libft"; msg "libft is forbidden in this project"
+	fi
+	mk=""
+	for f in Makefile makefile GNUmakefile; do [ -f "$DIR/$f" ] && mk+="$f "; done
+	if [ -n "$mk" ]; then
+		line_ko "no Makefile"; msg "found: $mk(the subject says \"Makefile: No\" for get_next_line, remove it)"
 	fi
 	if [ -z "$missing" ]; then
 		check_files "" "${MAND_C[@]}"
